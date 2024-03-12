@@ -1,29 +1,18 @@
 use std::{
-    path::PathBuf,
-    sync::{mpsc, Arc},
-    thread,
+    path::PathBuf, sync::Arc
 };
 
 use api::auth::UserInfo;
 use dirs::config_dir;
-use notify::{
-    event::{self, DataChange, ModifyKind},
-    RecommendedWatcher, Watcher,
-};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
-    io,
-    sync::{self, Mutex},
+    io, sync::{Mutex, MutexGuard},
 };
 
-use crate::Error;
+use crate::{daemon::notify, Error};
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Config {
-    user: Option<UserInfo>,
-}
-
+#[derive(Debug, Clone)]
 pub struct ConfigFile<T>
 where
     T: Serialize + DeserializeOwned + Default,
@@ -76,19 +65,80 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
         }
     }
 
+    pub fn config(&self) -> &T {
+        &self.config
+    }
+
     pub async fn save(&self) -> io::Result<()> {
         let (path, _) = Self::get_or_create_path().await?;
         fs::write(path, serde_json::to_vec(&self.config)?).await
     }
 }
 
+impl ConfigFile<Config> {
+    pub async fn with_lock(self) -> ConfigFile<ConfigWithLock> {
+        ConfigFile {
+            config: ConfigWithLock(Arc::new(Mutex::new(self.config))),
+            path: self.path,
+        }
+    }   
+}
+
+impl ConfigFile<ConfigWithLock> {
+    #[cfg(feature = "auto-update")]
+    pub async fn with_auto_update<'de>(self) -> Result<ConfigFile<ConfigWithLock>, notify::Error> {
+        Ok(ConfigFile {
+            config: self.config.run_auto_update(&self.path).await?,
+            path: self.path,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct Config {
+    user: Option<UserInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigWithLock(Arc<Mutex<Config>>);
+
+impl ConfigWithLock {
+    pub async fn lock(&self) -> MutexGuard<'_, Config> {
+        self.0.lock().await
+    }
+}
+
+impl Serialize for ConfigWithLock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.blocking_lock().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigWithLock {
+    fn deserialize<D>(deserializer: D) -> Result<ConfigWithLock, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(ConfigWithLock(Arc::new(Mutex::new(Config::deserialize(
+            deserializer,
+        )?))))
+    }
+}
+
+impl Default for ConfigWithLock {
+    fn default() -> Self {
+        ConfigWithLock(Arc::new(Mutex::new(Config::default())))
+    }
+}
+
 #[cfg(feature = "auto-update")]
-impl Config {
-    async fn run_auto_update<P: ToOwned<Owned = PathBuf>>(
-        self,
-        path: P,
-    ) -> notify::Result<Arc<Mutex<Self>>> {
-        let arc = Arc::new(Mutex::new(self));
+impl ConfigWithLock {
+    pub(crate) async fn run_auto_update(self, path: &PathBuf) -> notify::Result<ConfigWithLock> {
+        use notify::{RecommendedWatcher, Watcher};
+        let arc = self.clone();
         let conf_path = path.to_owned();
         let (tx, rx) = mpsc::channel();
         let (async_tx, mut async_rx) = sync::mpsc::channel::<notify::Event>(4);
@@ -108,12 +158,14 @@ impl Config {
         let arc_inner = arc.clone();
         tokio::spawn(async move {
             while let Some(event) = async_rx.recv().await {
-                if let notify::EventKind::Modify(ModifyKind::Data(_)) = event.kind {
+                if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) = event.kind {
                     if let Ok(data) = fs::read(&conf_path).await {
                         match serde_json::from_slice(&data) {
                             Ok(conf) => {
                                 let mut config = arc_inner.lock().await;
                                 *config = conf;
+                                #[cfg(feature = "sys-notify")]
+                                notify("配置文件已更新").await;
                             }
                             Err(e) => {
                                 eprintln!("Error parsing config: {}", e);

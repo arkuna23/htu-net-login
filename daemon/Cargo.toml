@@ -7,8 +7,8 @@ resolver = "2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-api = { path = "../api" }
-hyper = { version = "*", default-features = false }
+api = { path = "../api", features = ["async"] }
+hyper = { version = "*", default-features = false, features = ["server"] }
 tokio = { version = "*", default-features = false, features = [
     "rt",
     "fs",
@@ -16,10 +16,14 @@ tokio = { version = "*", default-features = false, features = [
 ] }
 serde = { version = "*", default-features = false, features = ["derive"] }
 serde_json = { version = "*", default-features = false }
+reqwest = "*"
 notify = { version = "*", optional = true }
-notify-rust = { version = "*", optional = true }
+notify-rust = { version = "*", optional = true, default-features = false, features = ["async", "zbus"]}
 dirs = "*"
 
 [features]
+# default = ["auto-update"]
+# default = ["sys-notify"]
+default = ["auto-update", "sys-notify"]
 sys-notify = ["notify-rust"]
 auto-update = ["notify"]

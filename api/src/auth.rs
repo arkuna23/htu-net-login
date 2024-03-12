@@ -89,7 +89,7 @@ fn get_js_auth_info(js: &str) -> AuthInfo {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum Suffix {
     ChinaMobie,
     ChinaUnicom,
@@ -149,7 +149,7 @@ impl<T: Display> Display for AuthError<T> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserInfo {
     id: String,
     password: String,
@@ -203,7 +203,7 @@ pub mod auth_async {
     pub async fn auth(
         index_url: IndexUrl,
         auth_info: AuthInfo,
-        user: UserInfo,
+        user: &UserInfo,
     ) -> Result<(), AuthError<serde_json::Value>> {
         let client = Client::new();
         // first auth
@@ -239,14 +239,15 @@ pub mod auth_async {
         }
 
         // quick auth
+
         let resp = client
             .get(
                 index_url.root
                     + "/quickauth.do?"
                     + url::form_urlencoded::Serializer::new(&mut String::new())
                         .extend_pairs(index_url.args)
-                        .append_pair("userid", (user.id + user.suffix.to_str()).as_str())
-                        .append_pair("passwd", user.password.as_str())
+                        .append_pair("userid", &(user.id.clone() + user.suffix.to_str()))
+                        .append_pair("passwd", &user.password)
                         .finish(),
             )
             .send()
@@ -300,12 +301,12 @@ pub mod auth_async {
                 password: "".to_string(),
                 suffix: super::Suffix::ChinaMobie,
             };
-            super::auth(index_url, auth_info, user).await.unwrap();
+            super::auth(index_url, auth_info, &user).await.unwrap();
         }
     }
 }
 #[cfg(feature = "blocking")]
-mod auth_blocking {
+pub mod auth_blocking {
 
     use super::*;
 
@@ -344,7 +345,7 @@ mod auth_blocking {
     pub fn auth(
         index_url: IndexUrl,
         auth_info: AuthInfo,
-        user: UserInfo,
+        user: &UserInfo,
     ) -> Result<(), AuthError<serde_json::Value>> {
         let client = reqwest::blocking::Client::new();
         // first auth
@@ -382,7 +383,7 @@ mod auth_blocking {
                     + "/quickauth.do?"
                     + url::form_urlencoded::Serializer::new(&mut String::new())
                         .extend_pairs(index_url.args)
-                        .append_pair("userid", (user.id + user.suffix.to_str()).as_str())
+                        .append_pair("userid", &(user.id.clone() + user.suffix.to_str()))
                         .append_pair("passwd", user.password.as_str())
                         .finish(),
             )
@@ -433,7 +434,7 @@ mod auth_blocking {
                 password: "".to_string(),
                 suffix: super::Suffix::ChinaMobie,
             };
-            auth(index_url, auth_info, user).unwrap();
+            auth(index_url, auth_info, &user).unwrap();
         }
     }
 }

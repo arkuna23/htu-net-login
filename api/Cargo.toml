@@ -19,6 +19,5 @@ regex = { version = "*", default-features = false }
 url = "*"
 
 [features]
-default = ["async"]
 async = ["tokio"]
 blocking = ["reqwest/blocking"]
