@@ -1,13 +1,12 @@
-use std::{
-    path::PathBuf, sync::Arc
-};
+use std::{path::PathBuf, sync::Arc, thread};
 
 use api::auth::UserInfo;
 use dirs::config_dir;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
-    io, sync::{Mutex, MutexGuard},
+    io,
+    sync::{Mutex, MutexGuard},
 };
 
 use crate::Error;
@@ -58,12 +57,22 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
             })
         } else {
             Ok(Self {
+<<<<<<< HEAD
                 config: serde_json::from_slice(&fs::read(&path).await.map(|data| if data.is_empty() {
                     "{}".into()
                 } else {
                     data
                 }).map_err(Error::TokioIo)?)
                     .map_err(Error::SerdeJson)?,
+=======
+                config: serde_json::from_slice(
+                    &fs::read(&path)
+                        .await
+                        .map(|data| if data.is_empty() { "{}".into() } else { data })
+                        .map_err(Error::TokioIo)?,
+                )
+                .map_err(Error::SerdeJson)?,
+>>>>>>> 3220e8c (tui init)
                 path,
             })
         }
@@ -85,16 +94,30 @@ impl ConfigFile<Config> {
             config: ConfigWithLock(Arc::new(Mutex::new(self.config))),
             path: self.path,
         }
-    }   
+    }
 }
 
 impl ConfigFile<ConfigWithLock> {
     #[cfg(feature = "auto-update")]
-    pub async fn with_auto_update<'de>(self) -> Result<ConfigFile<ConfigWithLock>, notify::Error> {
-        Ok(ConfigFile {
-            config: self.config.run_auto_update(&self.path).await?,
-            path: self.path,
-        })
+    pub async fn with_auto_update<'de>(
+        self,
+    ) -> Result<
+        (
+            ConfigFile<ConfigWithLock>,
+            thread::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+        ),
+        notify::Error,
+    > {
+        let (config, sender_handle, recv_handle) = self.config.run_auto_update(&self.path).await?;
+        Ok((
+            ConfigFile {
+                config,
+                path: self.path,
+            },
+            sender_handle,
+            recv_handle,
+        ))
     }
 }
 
@@ -140,7 +163,14 @@ impl Default for ConfigWithLock {
 
 #[cfg(feature = "auto-update")]
 impl ConfigWithLock {
-    pub(crate) async fn run_auto_update(self, path: &PathBuf) -> notify::Result<ConfigWithLock> {
+    pub(crate) async fn run_auto_update(
+        self,
+        path: &PathBuf,
+    ) -> notify::Result<(
+        ConfigWithLock,
+        thread::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    )> {
         use notify::{RecommendedWatcher, Watcher};
         let arc = self.clone();
         let conf_path = path.to_owned();
@@ -148,7 +178,11 @@ impl ConfigWithLock {
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(4);
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(&conf_path, notify::RecursiveMode::NonRecursive)?;
+<<<<<<< HEAD
         std::thread::spawn(move || {
+=======
+        let sender_handle = std::thread::spawn(move || {
+>>>>>>> 3220e8c (tui init)
             for res in rx {
                 match res {
                     Ok(event) => async_tx.blocking_send(event).unwrap(),
@@ -160,7 +194,7 @@ impl ConfigWithLock {
         });
 
         let arc_inner = arc.clone();
-        tokio::spawn(async move {
+        let recv_handle = tokio::spawn(async move {
             while let Some(event) = async_rx.recv().await {
                 if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) = event.kind {
                     if let Ok(data) = fs::read(&conf_path).await {
@@ -180,6 +214,7 @@ impl ConfigWithLock {
             }
         });
 
-        Ok(arc)
+        Ok((arc, sender_handle, recv_handle))
     }
 }
+

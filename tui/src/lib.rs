@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+pub mod component;
+
+>>>>>>> 3220e8c (tui init)
 use std::{
     io::{self, stdout, Stdout},
     panic,

@@ -6,10 +6,22 @@ use api::auth::{
 };
 use reqwest::Client;
 use tokio::{
+<<<<<<< HEAD
     runtime::Handle, task::{self, JoinError, JoinHandle, LocalSet}, time
 };
 
 use crate::{config::{ConfigFile, ConfigWithLock}, Error};
+=======
+    runtime::Handle,
+    task::{self, JoinError, JoinHandle, LocalSet},
+    time,
+};
+
+use crate::{
+    config::{ConfigFile, ConfigWithLock},
+    Error,
+};
+>>>>>>> 3220e8c (tui init)
 
 pub async fn check_autewifi(client: &Client) -> bool {
     if let Ok(resp) = client
@@ -47,13 +59,25 @@ pub async fn notify(msg: &str) {
     }
 }
 
+<<<<<<< HEAD
 pub async fn start() -> Result<(ConfigFile<ConfigWithLock>, JoinHandle<Result<(), JoinError>>), Error> {
     let config = ConfigFile::load_or_create()
         .await?
         .with_lock()
         .await;
+=======
+pub async fn start() -> Result<
+    (
+        ConfigFile<ConfigWithLock>,
+        JoinHandle<Result<((), (), ()), JoinError>>,
+    ),
+    Error,
+> {
+    let config = ConfigFile::load_or_create().await?.with_lock().await;
+>>>>>>> 3220e8c (tui init)
     #[cfg(feature = "auto-update")]
-    let config = config.with_auto_update().await.map_err(Error::FileNotify)?;
+    let (config, sender_handle, recv_handle) =
+        config.with_auto_update().await.map_err(Error::FileNotify)?;
     let config_inner = config.clone();
     let handle = task::spawn_blocking(move || {
         let rt = Handle::current();
@@ -61,6 +85,7 @@ pub async fn start() -> Result<(ConfigFile<ConfigWithLock>, JoinHandle<Result<()
             let client = Client::new();
             let config = config_inner.config().clone();
             let local = LocalSet::new();
+<<<<<<< HEAD
             local.run_until(async move {
                 println!("running daemon");
                 task::spawn_local(async move {
@@ -80,6 +105,43 @@ pub async fn start() -> Result<(ConfigFile<ConfigWithLock>, JoinHandle<Result<()
     });
 
     Ok((config, handle))
+=======
+            let res = local
+                .run_until(async move {
+                    println!("running daemon");
+                    task::spawn_local(async move {
+                        loop {
+                            if check_autewifi(&client).await {
+                                let config = config.clone();
+                                if let Some(user) = config.lock().await.user() {
+                                    login(user).await;
+                                };
+                            };
+
+                            time::sleep(Duration::from_secs(4)).await;
+                        }
+                    })
+                    .await
+                })
+                .await;
+            if let Err(e) = res {
+                eprintln!("daemon error: {}", e);
+            }
+        })
+    });
+
+    #[cfg(not(feature = "auto-update"))]
+    return Ok((config, handle));
+    #[cfg(feature = "auto-update")]
+    Ok((
+        config,
+        tokio::spawn(async move {
+            let sender_handle_async = task::spawn_blocking(move || sender_handle.join().unwrap());
+
+            tokio::try_join!(sender_handle_async, recv_handle, handle)
+        }),
+    ))
+>>>>>>> 3220e8c (tui init)
 }
 
 async fn login(user: &UserInfo) -> bool {

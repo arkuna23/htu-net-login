@@ -30,8 +30,17 @@ impl StdError for Error {}
 pub async fn start() {
     let conf = daemon::start().await.unwrap();
     let serv_handle = tokio::spawn(serve::Server::serve(conf.0));
+<<<<<<< HEAD
     
     let handles = tokio::join!(conf.1, serv_handle);
     handles.0.unwrap().unwrap();
     handles.1.unwrap().unwrap();
+=======
+
+    let handles = tokio::join!(conf.1, serv_handle);
+    match handles.0 {
+        Ok(r) => if let Err(e) = r {},
+        Err(_) => {}
+    }
+>>>>>>> 3220e8c (tui init)
 }
