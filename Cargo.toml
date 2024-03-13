@@ -1,3 +1,9 @@
 [workspace]
-members = ["api", "daemon"]
+members = ["api", "daemon", "tui", "bin"]
 resolver = "2"
+
+[profile.release]
+lto = true
+opt-level = 3
+strip = "symbols"
+panic = "abort"

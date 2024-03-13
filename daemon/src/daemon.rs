@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use api::auth::{
     auth_async::{auth, get_auth_info, get_index_page},
@@ -6,12 +6,10 @@ use api::auth::{
 };
 use reqwest::Client;
 use tokio::{
-    sync::mpsc::{self, Sender},
-    task::JoinHandle,
-    time,
+    runtime::Handle, task::{self, JoinError, JoinHandle, LocalSet}, time
 };
 
-use crate::{config::{self, ConfigFile, ConfigWithLock}, translate::{Chinese, Translation, TranslationKey}, Error};
+use crate::{config::{ConfigFile, ConfigWithLock}, Error};
 
 pub async fn check_autewifi(client: &Client) -> bool {
     if let Ok(resp) = client
@@ -49,7 +47,7 @@ pub async fn notify(msg: &str) {
     }
 }
 
-pub async fn start() -> Result<ConfigFile<ConfigWithLock>, Error> {
+pub async fn start() -> Result<(ConfigFile<ConfigWithLock>, JoinHandle<Result<(), JoinError>>), Error> {
     let config = ConfigFile::load_or_create()
         .await?
         .with_lock()
@@ -57,29 +55,31 @@ pub async fn start() -> Result<ConfigFile<ConfigWithLock>, Error> {
     #[cfg(feature = "auto-update")]
     let config = config.with_auto_update().await.map_err(Error::FileNotify)?;
     let config_inner = config.clone();
-    tokio::spawn(async {
-        let mut fut: Option<JoinHandle<()>> = None;
-        let client = Arc::new(Client::new());
-        let config = config_inner;
-        println!("running daemon");
-        loop {
-            if fut.as_ref().is_none() || fut.as_ref().unwrap().is_finished() {
-                let arc_inner = client.clone();
-                let config_inner = config.config().clone();
-                fut = Some(tokio::task::spawn_local(async move {
-                    if check_autewifi(&arc_inner).await {
-                        if let Some(user) = config_inner.lock().await.user() {
-                            login(user).await;
-                        }
-                    };
-                    time::sleep(Duration::from_secs(6)).await;
-                }));
-            }
-
-            time::sleep(Duration::from_millis(250)).await;
-        }
+    let handle = task::spawn_blocking(move || {
+        let rt = Handle::current();
+        rt.block_on(async move {
+            let client = Client::new();
+            let config = config_inner.config().clone();
+            let local = LocalSet::new();
+            local.run_until(async move {
+                println!("running daemon");
+                task::spawn_local(async move {
+                    loop {
+                        if check_autewifi(&client).await {
+                            let config = config.clone();
+                            if let Some(user) = config.lock().await.user() {
+                                login(user).await;
+                            };
+                        };
+            
+                        time::sleep(Duration::from_secs(4)).await;
+                    }
+                }).await
+            }).await
+        })
     });
-    Ok(config)
+
+    Ok((config, handle))
 }
 
 async fn login(user: &UserInfo) -> bool {

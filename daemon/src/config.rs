@@ -10,7 +10,7 @@ use tokio::{
     io, sync::{Mutex, MutexGuard},
 };
 
-use crate::{daemon::notify, Error};
+use crate::Error;
 
 #[derive(Debug, Clone)]
 pub struct ConfigFile<T>
@@ -58,7 +58,11 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
             })
         } else {
             Ok(Self {
-                config: serde_json::from_slice(&fs::read(&path).await.map_err(Error::TokioIo)?)
+                config: serde_json::from_slice(&fs::read(&path).await.map(|data| if data.is_empty() {
+                    "{}".into()
+                } else {
+                    data
+                }).map_err(Error::TokioIo)?)
                     .map_err(Error::SerdeJson)?,
                 path,
             })
@@ -140,11 +144,11 @@ impl ConfigWithLock {
         use notify::{RecommendedWatcher, Watcher};
         let arc = self.clone();
         let conf_path = path.to_owned();
-        let (tx, rx) = mpsc::channel();
-        let (async_tx, mut async_rx) = sync::mpsc::channel::<notify::Event>(4);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(4);
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(&conf_path, notify::RecursiveMode::NonRecursive)?;
-        thread::spawn(move || {
+        std::thread::spawn(move || {
             for res in rx {
                 match res {
                     Ok(event) => async_tx.blocking_send(event).unwrap(),
@@ -165,7 +169,7 @@ impl ConfigWithLock {
                                 let mut config = arc_inner.lock().await;
                                 *config = conf;
                                 #[cfg(feature = "sys-notify")]
-                                notify("配置文件已更新").await;
+                                crate::daemon::notify("配置文件已更新").await;
                             }
                             Err(e) => {
                                 eprintln!("Error parsing config: {}", e);
