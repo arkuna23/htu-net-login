@@ -57,14 +57,6 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
             })
         } else {
             Ok(Self {
-<<<<<<< HEAD
-                config: serde_json::from_slice(&fs::read(&path).await.map(|data| if data.is_empty() {
-                    "{}".into()
-                } else {
-                    data
-                }).map_err(Error::TokioIo)?)
-                    .map_err(Error::SerdeJson)?,
-=======
                 config: serde_json::from_slice(
                     &fs::read(&path)
                         .await
@@ -72,7 +64,6 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
                         .map_err(Error::TokioIo)?,
                 )
                 .map_err(Error::SerdeJson)?,
->>>>>>> 3220e8c (tui init)
                 path,
             })
         }
@@ -178,11 +169,7 @@ impl ConfigWithLock {
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(4);
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(&conf_path, notify::RecursiveMode::NonRecursive)?;
-<<<<<<< HEAD
-        std::thread::spawn(move || {
-=======
         let sender_handle = std::thread::spawn(move || {
->>>>>>> 3220e8c (tui init)
             for res in rx {
                 match res {
                     Ok(event) => async_tx.blocking_send(event).unwrap(),
@@ -217,4 +204,3 @@ impl ConfigWithLock {
         Ok((arc, sender_handle, recv_handle))
     }
 }
-
