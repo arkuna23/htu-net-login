@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use api::auth::{
-    auth_async::{auth, get_auth_info, get_index_page},
-    UserInfo,
-};
+use api::auth::auth_async::{auth, get_auth_info, get_index_page};
 use reqwest::Client;
 use tokio::{
     runtime::Handle,
@@ -12,7 +9,7 @@ use tokio::{
 };
 
 use crate::{
-    config::{ConfigFile, ConfigWithLock},
+    config::{AppConfig, ConfigWithLock},
     Error,
 };
 
@@ -54,12 +51,12 @@ pub async fn notify(msg: &str) {
 
 pub async fn start() -> Result<
     (
-        ConfigFile<ConfigWithLock>,
+        AppConfig<ConfigWithLock>,
         JoinHandle<Result<((), (), ()), JoinError>>,
     ),
     Error,
 > {
-    let config = ConfigFile::load_or_create().await?.with_lock().await;
+    let config = AppConfig::load_or_create().await?.with_lock().await;
     #[cfg(feature = "auto-update")]
     let (config, sender_handle, recv_handle) =
         config.with_auto_update().await.map_err(Error::FileNotify)?;
@@ -68,22 +65,21 @@ pub async fn start() -> Result<
         let rt = Handle::current();
         rt.block_on(async move {
             let client = Client::new();
-            let config = config_inner.config().clone();
             let local = LocalSet::new();
             let res = local
                 .run_until(async move {
-                    println!("running daemon");
+                    println!("running login thread");
                     task::spawn_local(async move {
-                        loop {
+                        while config_inner.running() {
                             if check_autewifi(&client).await {
-                                let config = config.clone();
-                                if let Some(user) = config.lock().await.user() {
-                                    login(user).await;
+                                if config_inner.config().read().await.user().is_some() {
+                                    login(config_inner.clone()).await;
+                                } else {
+                                    time::sleep(Duration::from_secs(1)).await;
                                 };
                             };
-
-                            time::sleep(Duration::from_secs(4)).await;
                         }
+                        println!("login thread exit");
                     })
                     .await
                 })
@@ -99,15 +95,11 @@ pub async fn start() -> Result<
     #[cfg(feature = "auto-update")]
     Ok((
         config,
-        tokio::spawn(async move {
-            let sender_handle_async = task::spawn_blocking(move || sender_handle.join().unwrap());
-
-            tokio::try_join!(sender_handle_async, recv_handle, handle)
-        }),
+        tokio::spawn(async move { tokio::try_join!(sender_handle, recv_handle, handle) }),
     ))
 }
 
-async fn login(user: &UserInfo) -> bool {
+async fn login(app_config: AppConfig<ConfigWithLock>) -> bool {
     let url = match get_index_page(false).await {
         Ok(url) => url,
         Err(e) => {
@@ -115,6 +107,8 @@ async fn login(user: &UserInfo) -> bool {
             return false;
         }
     };
+    app_config.config().write().await.set_last_url(&url.url);
+    let _ = app_config.save().await;
     let auth_info = match get_auth_info(&url).await {
         Ok(auth_info) => auth_info,
         Err(e) => {
@@ -122,7 +116,13 @@ async fn login(user: &UserInfo) -> bool {
             return false;
         }
     };
-    if let Err(e) = auth(url, auth_info, user).await {
+    if let Err(e) = auth(
+        url,
+        auth_info,
+        app_config.config().read().await.user().unwrap(),
+    )
+    .await
+    {
         eprintln!("Auth error: {}", e);
         return false;
     };

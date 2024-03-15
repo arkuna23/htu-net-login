@@ -1,4 +1,13 @@
-use std::{path::PathBuf, sync::Arc, thread};
+use std::{
+    ops::Deref,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use api::auth::UserInfo;
 use dirs::config_dir;
@@ -6,18 +15,20 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io,
-    sync::{Mutex, MutexGuard},
+    sync::RwLock,
+    task::spawn_blocking,
 };
 
 use crate::Error;
 
 #[derive(Debug, Clone)]
-pub struct ConfigFile<T>
+pub struct AppConfig<T>
 where
     T: Serialize + DeserializeOwned + Default,
 {
     config: T,
-    path: PathBuf,
+    path: Arc<PathBuf>,
+    running: Arc<AtomicBool>,
 }
 
 impl Config {
@@ -28,9 +39,17 @@ impl Config {
     pub fn set_user(&mut self, user: UserInfo) {
         self.user = Some(user);
     }
+
+    pub fn set_last_url(&mut self, url: &str) {
+        self.last_login_url = Some(url.to_owned());
+    }
+
+    pub fn last_url(&self) -> Option<&str> {
+        self.last_login_url.as_deref()
+    }
 }
 
-impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
+impl<'a, T: Serialize + DeserializeOwned + Default> AppConfig<T> {
     async fn get_or_create_path() -> io::Result<(PathBuf, bool)> {
         let dir = config_dir().unwrap().join("htu-net");
         if !dir.exists() {
@@ -53,7 +72,8 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
         if created {
             Ok(Self {
                 config: T::default(),
-                path,
+                path: Arc::new(path),
+                running: Arc::new(AtomicBool::new(true)),
             })
         } else {
             Ok(Self {
@@ -64,7 +84,8 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
                         .map_err(Error::TokioIo)?,
                 )
                 .map_err(Error::SerdeJson)?,
-                path,
+                path: Arc::new(path),
+                running: Arc::new(AtomicBool::new(true)),
             })
         }
     }
@@ -77,34 +98,50 @@ impl<'a, T: Serialize + DeserializeOwned + Default> ConfigFile<T> {
         let (path, _) = Self::get_or_create_path().await?;
         fs::write(path, serde_json::to_vec(&self.config)?).await
     }
+
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn set_running(&mut self, running: bool) {
+        self.running.store(running, Ordering::SeqCst)
+    }
+
+    pub fn running_atomic(&self) -> Arc<AtomicBool> {
+        self.running.clone()
+    }
 }
 
-impl ConfigFile<Config> {
-    pub async fn with_lock(self) -> ConfigFile<ConfigWithLock> {
-        ConfigFile {
-            config: ConfigWithLock(Arc::new(Mutex::new(self.config))),
+impl AppConfig<Config> {
+    pub async fn with_lock(self) -> AppConfig<ConfigWithLock> {
+        AppConfig {
+            config: ConfigWithLock(Arc::new(RwLock::new(self.config))),
             path: self.path,
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 }
 
-impl ConfigFile<ConfigWithLock> {
+impl AppConfig<ConfigWithLock> {
     #[cfg(feature = "auto-update")]
     pub async fn with_auto_update<'de>(
         self,
     ) -> Result<
         (
-            ConfigFile<ConfigWithLock>,
-            thread::JoinHandle<()>,
+            AppConfig<ConfigWithLock>,
+            tokio::task::JoinHandle<()>,
             tokio::task::JoinHandle<()>,
         ),
         notify::Error,
     > {
-        let (config, sender_handle, recv_handle) = self.config.run_auto_update(&self.path).await?;
+        let atomic = self.running_atomic();
+        let (config, sender_handle, recv_handle) =
+            self.config.run_auto_update(&self.path, atomic).await?;
         Ok((
-            ConfigFile {
+            AppConfig {
                 config,
                 path: self.path,
+                running: self.running,
             },
             sender_handle,
             recv_handle,
@@ -115,14 +152,19 @@ impl ConfigFile<ConfigWithLock> {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Config {
     user: Option<UserInfo>,
+    last_login_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConfigWithLock(Arc<Mutex<Config>>);
+type ConfigLock = Arc<RwLock<Config>>;
 
-impl ConfigWithLock {
-    pub async fn lock(&self) -> MutexGuard<'_, Config> {
-        self.0.lock().await
+#[derive(Debug, Clone)]
+pub struct ConfigWithLock(ConfigLock);
+
+impl Deref for ConfigWithLock {
+    type Target = ConfigLock;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -131,7 +173,7 @@ impl Serialize for ConfigWithLock {
     where
         S: serde::Serializer,
     {
-        self.0.blocking_lock().serialize(serializer)
+        self.0.blocking_read().serialize(serializer)
     }
 }
 
@@ -140,7 +182,7 @@ impl<'de> Deserialize<'de> for ConfigWithLock {
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(ConfigWithLock(Arc::new(Mutex::new(Config::deserialize(
+        Ok(ConfigWithLock(Arc::new(RwLock::new(Config::deserialize(
             deserializer,
         )?))))
     }
@@ -148,7 +190,7 @@ impl<'de> Deserialize<'de> for ConfigWithLock {
 
 impl Default for ConfigWithLock {
     fn default() -> Self {
-        ConfigWithLock(Arc::new(Mutex::new(Config::default())))
+        ConfigWithLock(Arc::new(RwLock::new(Config::default())))
     }
 }
 
@@ -157,48 +199,64 @@ impl ConfigWithLock {
     pub(crate) async fn run_auto_update(
         self,
         path: &PathBuf,
+        running: Arc<AtomicBool>,
     ) -> notify::Result<(
         ConfigWithLock,
-        thread::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
     )> {
         use notify::{RecommendedWatcher, Watcher};
         let arc = self.clone();
         let conf_path = path.to_owned();
         let (tx, rx) = std::sync::mpsc::channel();
-        let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(4);
+        let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
         watcher.watch(&conf_path, notify::RecursiveMode::NonRecursive)?;
-        let sender_handle = std::thread::spawn(move || {
-            for res in rx {
-                match res {
-                    Ok(event) => async_tx.blocking_send(event).unwrap(),
-                    Err(e) => {
-                        eprintln!("watch error: {:?}", e);
+
+        let run_inner = running.clone();
+        let sender_handle = spawn_blocking(move || {
+            println!("file watcher thread running");
+            while run_inner.load(Ordering::SeqCst) {
+                while let Ok(res) = rx.try_recv() {
+                    println!("file updated");
+                    match res {
+                        Ok(event) => async_tx.send(event).unwrap(),
+                        Err(e) => {
+                            eprintln!("watch error: {:?}", e);
+                        }
                     }
                 }
+                thread::sleep(Duration::from_millis(250));
             }
+            println!("file watcher thread exit");
         });
 
         let arc_inner = arc.clone();
         let recv_handle = tokio::spawn(async move {
-            while let Some(event) = async_rx.recv().await {
-                if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) = event.kind {
-                    if let Ok(data) = fs::read(&conf_path).await {
-                        match serde_json::from_slice(&data) {
-                            Ok(conf) => {
-                                let mut config = arc_inner.lock().await;
-                                *config = conf;
-                                #[cfg(feature = "sys-notify")]
-                                crate::daemon::notify("配置文件已更新").await;
-                            }
-                            Err(e) => {
-                                eprintln!("Error parsing config: {}", e);
-                            }
-                        };
+            println!("async file handler running");
+            while running.load(Ordering::SeqCst) {
+                while let Ok(event) = async_rx.try_recv() {
+                    if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) =
+                        event.kind
+                    {
+                        if let Ok(data) = fs::read(&conf_path).await {
+                            match serde_json::from_slice(&data) {
+                                Ok(conf) => {
+                                    let mut config = arc_inner.write().await;
+                                    *config = conf;
+                                    #[cfg(feature = "sys-notify")]
+                                    crate::daemon::notify("配置文件已更新").await;
+                                }
+                                Err(e) => {
+                                    eprintln!("Error parsing config: {}", e);
+                                }
+                            };
+                        }
                     }
                 }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
+            println!("async file handler exit");
         });
 
         Ok((arc, sender_handle, recv_handle))

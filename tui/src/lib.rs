@@ -1,32 +1,24 @@
 pub mod component;
 pub mod data;
+pub mod handler;
 
 use std::{
-    error::Error, fmt::Display, io::{self, stdout, Stdout}, panic, result
+    io::{self, stdout, Stdout},
+    panic, result,
 };
 
+use component::border::AppContainer;
 use crossterm::{
-    event::EnableMouseCapture,
+    event::{DisableMouseCapture, EnableMouseCapture},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use data::Signal;
+use data::AppError;
+use handler::run_handler;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle};
 
-pub(crate) type Result<T> = result::Result<T, TuiError>;
-#[derive(Debug)]
-pub enum TuiError {
-
-}
-
-impl Display for TuiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", "")
-    }
-}
-
-impl Error for TuiError {}
+pub(crate) type TuiTerminal = Terminal<CrosstermBackend<Stdout>>;
+pub(crate) type Result<T> = result::Result<T, AppError>;
 
 fn startup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     stdout().execute(EnterAlternateScreen)?;
@@ -37,25 +29,21 @@ fn startup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         hook(info)
     }));
 
-    let _ = stdout().execute(EnableMouseCapture);
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     terminal.clear()?;
-
+    let _ = stdout().execute(EnableMouseCapture);
     Ok(terminal)
 }
 
 fn shutdown() -> io::Result<()> {
+    let _ = stdout().execute(DisableMouseCapture);
     stdout().execute(LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }
 
-pub async fn term_event_loop(tx: UnboundedSender<Signal>) -> JoinHandle<()> {
-    
-}
-
-pub async fn run() -> io::Result<()> {
-    startup()?;
-    todo!();
-    shutdown()
+pub async fn run(frame_rate: u16, tick_rate: u16) -> Result<()> {
+    let terminal = startup().map_err(AppError::StdIo)?;
+    run_handler(AppContainer::default(), terminal, frame_rate, tick_rate).await?;
+    shutdown().map_err(AppError::StdIo)
 }

@@ -15,4 +15,3 @@ tui = { path = "../tui", optional = true }
 clap = { version = "*", features = ["derive"] }
 
 [features]
-default = ["daemon", "tui"]
