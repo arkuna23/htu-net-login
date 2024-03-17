@@ -33,6 +33,6 @@ pub async fn start() {
 
     // !todo pass panic to server thread
     let handles = tokio::join!(conf.1, serv_handle);
-    handles.0.unwrap().unwrap();
+    handles.0.unwrap();
     handles.1.unwrap().unwrap();
 }

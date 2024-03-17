@@ -1,34 +1,21 @@
-use std::{
-    ops::Deref,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::Duration,
-};
+use std::{ops::Deref, path::PathBuf, sync::Arc};
 
 use api::auth::UserInfo;
 use dirs::config_dir;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io,
     sync::RwLock,
-    task::spawn_blocking,
 };
 
 use crate::Error;
 
-#[derive(Debug, Clone)]
-pub struct AppConfig<T>
-where
-    T: Serialize + DeserializeOwned + Default,
-{
-    config: T,
-    path: Arc<PathBuf>,
-    running: Arc<AtomicBool>,
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Config {
+    user: Option<UserInfo>,
+    last_login_url: Option<String>,
+    logout_url_base: Option<String>,
 }
 
 impl Config {
@@ -40,16 +27,30 @@ impl Config {
         self.user = Some(user);
     }
 
-    pub fn set_last_url(&mut self, url: &str) {
-        self.last_login_url = Some(url.to_owned());
+    pub fn set_last_url(&mut self, url: String) {
+        self.last_login_url = Some(url);
     }
 
     pub fn last_url(&self) -> Option<&str> {
         self.last_login_url.as_deref()
     }
+
+    pub fn set_logout_url_base(&mut self, url: String) {
+        self.logout_url_base = Some(url);
+    }
+
+    pub fn logout_url_base(&self) -> Option<&str> {
+        self.logout_url_base.as_deref()
+    }
 }
 
-impl<'a, T: Serialize + DeserializeOwned + Default> AppConfig<T> {
+pub(crate) trait AppConfig: Sized {
+    fn new(conf: Config, path: PathBuf) -> Self;
+    fn config(&self) -> &Config;
+    fn config_mut(&mut self) -> &mut Config;
+    fn config_path(&self) -> &PathBuf;
+    fn config_path_mut(&mut self) -> &mut PathBuf;
+
     async fn get_or_create_path() -> io::Result<(PathBuf, bool)> {
         let dir = config_dir().unwrap().join("htu-net");
         if !dir.exists() {
@@ -63,202 +64,153 @@ impl<'a, T: Serialize + DeserializeOwned + Default> AppConfig<T> {
         Ok((path, false))
     }
 
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-
-    pub async fn load_or_create() -> Result<Self, Error> {
+    async fn load_or_create() -> Result<Self, Error> {
         let (path, created) = Self::get_or_create_path().await.map_err(Error::TokioIo)?;
         if created {
-            Ok(Self {
-                config: T::default(),
-                path: Arc::new(path),
-                running: Arc::new(AtomicBool::new(true)),
-            })
+            Ok(Self::new(Config::default(), path))
         } else {
-            Ok(Self {
-                config: serde_json::from_slice(
+            Ok(Self::new(
+                serde_json::from_slice(
                     &fs::read(&path)
                         .await
                         .map(|data| if data.is_empty() { "{}".into() } else { data })
                         .map_err(Error::TokioIo)?,
                 )
                 .map_err(Error::SerdeJson)?,
-                path: Arc::new(path),
-                running: Arc::new(AtomicBool::new(true)),
-            })
+                path,
+            ))
         }
     }
 
-    pub fn config(&self) -> &T {
+    async fn save(&self) -> io::Result<()> {
+        let (path, _) = Self::get_or_create_path().await?;
+        fs::write(path, serde_json::to_vec_pretty(self.config())?).await
+    }
+}
+
+pub(crate) trait AppState {
+    fn running(&self) -> bool;
+    fn stop(&mut self);
+}
+
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    config: Config,
+    path: PathBuf,
+    running: bool,
+}
+
+impl AppConfig for AppInfo {
+    fn new(conf: Config, path: PathBuf) -> Self {
+        Self {
+            config: conf,
+            path,
+            running: true,
+        }
+    }
+
+    fn config(&self) -> &Config {
         &self.config
     }
 
-    pub async fn save(&self) -> io::Result<()> {
-        let (path, _) = Self::get_or_create_path().await?;
-        fs::write(path, serde_json::to_vec(&self.config)?).await
+    fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
     }
 
-    pub fn running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+    fn config_path(&self) -> &PathBuf {
+        &self.path
     }
 
-    pub fn set_running(&mut self, running: bool) {
-        self.running.store(running, Ordering::SeqCst)
-    }
-
-    pub fn running_atomic(&self) -> Arc<AtomicBool> {
-        self.running.clone()
+    fn config_path_mut(&mut self) -> &mut PathBuf {
+        &mut self.path
     }
 }
 
-impl AppConfig<Config> {
-    pub async fn with_lock(self) -> AppConfig<ConfigWithLock> {
-        AppConfig {
-            config: ConfigWithLock(Arc::new(RwLock::new(self.config))),
-            path: self.path,
-            running: Arc::new(AtomicBool::new(true)),
-        }
+impl AppState for AppInfo {
+    fn running(&self) -> bool {
+        self.running
+    }
+
+    fn stop(&mut self) {
+        self.running = false;
     }
 }
 
-impl AppConfig<ConfigWithLock> {
-    #[cfg(feature = "auto-update")]
-    pub async fn with_auto_update<'de>(
-        self,
-    ) -> Result<
-        (
-            AppConfig<ConfigWithLock>,
-            tokio::task::JoinHandle<()>,
-            tokio::task::JoinHandle<()>,
-        ),
-        notify::Error,
-    > {
-        let atomic = self.running_atomic();
-        let (config, sender_handle, recv_handle) =
-            self.config.run_auto_update(&self.path, atomic).await?;
-        Ok((
-            AppConfig {
-                config,
-                path: self.path,
-                running: self.running,
-            },
-            sender_handle,
-            recv_handle,
-        ))
+impl AppInfo {
+    pub fn global(self) -> GlobalAppInfo {
+        GlobalAppInfo(Arc::new(RwLock::new(self)))
     }
 }
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Config {
-    user: Option<UserInfo>,
-    last_login_url: Option<String>,
-}
-
-type ConfigLock = Arc<RwLock<Config>>;
 
 #[derive(Debug, Clone)]
-pub struct ConfigWithLock(ConfigLock);
+pub struct GlobalAppInfo(Arc<RwLock<AppInfo>>);
 
-impl Deref for ConfigWithLock {
-    type Target = ConfigLock;
+impl Deref for GlobalAppInfo {
+    type Target = Arc<RwLock<AppInfo>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl Serialize for ConfigWithLock {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.blocking_read().serialize(serializer)
-    }
-}
+impl GlobalAppInfo {
+    #[cfg(feature = "auto-update")]
+    pub async fn run_auto_update(
+        &self,
+    ) -> Result<(notify::RecommendedWatcher, tokio::task::JoinHandle<()>), notify::Error> {
+        use notify::{event::AccessMode, Event, Watcher};
+        use tokio::sync::mpsc;
 
-impl<'de> Deserialize<'de> for ConfigWithLock {
-    fn deserialize<D>(deserializer: D) -> Result<ConfigWithLock, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(ConfigWithLock(Arc::new(RwLock::new(Config::deserialize(
-            deserializer,
-        )?))))
-    }
-}
-
-impl Default for ConfigWithLock {
-    fn default() -> Self {
-        ConfigWithLock(Arc::new(RwLock::new(Config::default())))
-    }
-}
-
-#[cfg(feature = "auto-update")]
-impl ConfigWithLock {
-    pub(crate) async fn run_auto_update(
-        self,
-        path: &PathBuf,
-        running: Arc<AtomicBool>,
-    ) -> notify::Result<(
-        ConfigWithLock,
-        tokio::task::JoinHandle<()>,
-        tokio::task::JoinHandle<()>,
-    )> {
-        use notify::{RecommendedWatcher, Watcher};
-        let arc = self.clone();
-        let conf_path = path.to_owned();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
-        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
-        watcher.watch(&conf_path, notify::RecursiveMode::NonRecursive)?;
-
-        let run_inner = running.clone();
-        let sender_handle = spawn_blocking(move || {
-            println!("file watcher thread running");
-            while run_inner.load(Ordering::SeqCst) {
-                while let Ok(res) = rx.try_recv() {
-                    println!("file updated");
-                    match res {
-                        Ok(event) => async_tx.send(event).unwrap(),
+        let app_info = self.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let conf_path = app_info.read().await.config_path().clone();
+        let mut watcher = notify::recommended_watcher(move |res: Result<Event, _>| match res {
+            Ok(r) => {
+                if let notify::EventKind::Access(notify::event::AccessKind::Close(
+                    AccessMode::Write,
+                )) = r.kind
+                {
+                    if r.paths.iter().any(|p| *p == conf_path) {
+                        println!("config file updated");
+                        tx.send(()).unwrap();
+                    }
+                }
+            }
+            Err(e) => eprintln!("watch err:{:?}", e),
+        })?;
+        let app_info_inner = app_info.clone();
+        let handle = tokio::spawn(async move {
+            println!("config file updater started");
+            let conf_path = app_info_inner.read().await.config_path().clone();
+            while rx.recv().await.is_some() && app_info_inner.running().await {
+                if let Ok(data) = fs::read(&conf_path).await {
+                    #[cfg(debug_assertions)]
+                    println!("config file updated, parsing...");
+                    match serde_json::from_slice(&data) {
+                        Ok(conf) => {
+                            *app_info.write().await.config_mut() = conf;
+                            #[cfg(debug_assertions)]
+                            println!("config updated successfully");
+                            #[cfg(feature = "sys-notify")]
+                            crate::daemon::notify("配置文件已更新").await;
+                        }
                         Err(e) => {
-                            eprintln!("watch error: {:?}", e);
+                            eprintln!("Error parsing config: {}", e);
                         }
-                    }
+                    };
                 }
-                thread::sleep(Duration::from_millis(250));
             }
-            println!("file watcher thread exit");
+            println!("config file updater stopped");
         });
+        watcher.watch(
+            self.read().await.config_path().parent().unwrap(),
+            notify::RecursiveMode::NonRecursive,
+        )?;
 
-        let arc_inner = arc.clone();
-        let recv_handle = tokio::spawn(async move {
-            println!("async file handler running");
-            while running.load(Ordering::SeqCst) {
-                while let Ok(event) = async_rx.try_recv() {
-                    if let notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) =
-                        event.kind
-                    {
-                        if let Ok(data) = fs::read(&conf_path).await {
-                            match serde_json::from_slice(&data) {
-                                Ok(conf) => {
-                                    let mut config = arc_inner.write().await;
-                                    *config = conf;
-                                    #[cfg(feature = "sys-notify")]
-                                    crate::daemon::notify("配置文件已更新").await;
-                                }
-                                Err(e) => {
-                                    eprintln!("Error parsing config: {}", e);
-                                }
-                            };
-                        }
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-            println!("async file handler exit");
-        });
+        Ok((watcher, handle))
+    }
 
-        Ok((arc, sender_handle, recv_handle))
+    pub async fn running(&self) -> bool {
+        self.0.read().await.running()
     }
 }

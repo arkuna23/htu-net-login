@@ -1,22 +1,26 @@
 use std::time::Duration;
 
-use api::auth::auth_async::{auth, get_auth_info, get_index_page};
+use api::auth::{
+    auth_async::{auth, get_auth_info, get_index_page},
+    AuthError, UserInfo,
+};
+use notify::Watcher;
 use reqwest::Client;
 use tokio::{
     runtime::Handle,
-    task::{self, JoinError, JoinHandle, LocalSet},
+    task::{self, JoinHandle, LocalSet},
     time,
 };
 
 use crate::{
-    config::{AppConfig, ConfigWithLock},
+    config::{AppConfig, AppInfo, GlobalAppInfo},
     Error,
 };
 
 pub async fn check_autewifi(client: &Client) -> bool {
     if let Ok(resp) = client
         .get("http://192.168.0.1")
-        .timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(1))
         .send()
         .await
         .map(|r| r.text())
@@ -44,24 +48,21 @@ pub async fn notify(msg: &str) {
         .body(msg)
         .show_async()
         .await;
+    println!("send notify: {}", msg);
     if let Err(e) = result {
         eprintln!("sys notify err: {}", e)
     }
 }
 
-pub async fn start() -> Result<
-    (
-        AppConfig<ConfigWithLock>,
-        JoinHandle<Result<((), (), ()), JoinError>>,
-    ),
-    Error,
-> {
-    let config = AppConfig::load_or_create().await?.with_lock().await;
+pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
+    let appinfo = AppInfo::load_or_create().await?.global();
     #[cfg(feature = "auto-update")]
-    let (config, sender_handle, recv_handle) =
-        config.with_auto_update().await.map_err(Error::FileNotify)?;
-    let config_inner = config.clone();
+    let (mut watcher, notify_handle) =
+        appinfo.run_auto_update().await.map_err(Error::FileNotify)?;
+
+    let appinfo_inner = appinfo.clone();
     let handle = task::spawn_blocking(move || {
+        let appinfo = appinfo_inner;
         let rt = Handle::current();
         rt.block_on(async move {
             let client = Client::new();
@@ -70,16 +71,40 @@ pub async fn start() -> Result<
                 .run_until(async move {
                     println!("running login thread");
                     task::spawn_local(async move {
-                        while config_inner.running() {
-                            if check_autewifi(&client).await {
-                                if config_inner.config().read().await.user().is_some() {
-                                    login(config_inner.clone()).await;
-                                } else {
-                                    time::sleep(Duration::from_secs(1)).await;
-                                };
-                            };
+                        loop {
+                            if appinfo.running().await {
+                                if check_autewifi(&client).await {
+                                    let user = appinfo.read().await.config().user().cloned();
+                                    if let Some(user) = user {
+                                        println!("autewifi detected, trying to login");
+                                        match login(user).await {
+                                            Ok(url) => {
+                                                let mut appinfo_write = appinfo.write().await;
+                                                appinfo_write
+                                                    .config_mut()
+                                                    .set_last_url(url.last_url);
+                                                appinfo_write
+                                                    .config_mut()
+                                                    .set_logout_url_base(url.logout_url_base);
+                                                drop(appinfo_write);
+                                                let _ = appinfo.read().await.save().await;
+                                                println!("login success");
+                                            }
+                                            Err(e) => eprintln!("login error: {}", e),
+                                        };
+                                    } else {
+                                        time::sleep(Duration::from_secs(1)).await;
+                                    };
+                                }
+                            } else {
+                                break;
+                            }
                         }
                         println!("login thread exit");
+                        #[cfg(feature = "auto-update")]
+                        watcher
+                            .unwatch(appinfo.read().await.config_path().parent().unwrap())
+                            .unwrap()
                     })
                     .await
                 })
@@ -91,43 +116,38 @@ pub async fn start() -> Result<
     });
 
     #[cfg(not(feature = "auto-update"))]
-    return Ok((config, handle));
+    return Ok((appinfo, handle));
     #[cfg(feature = "auto-update")]
     Ok((
-        config,
-        tokio::spawn(async move { tokio::try_join!(sender_handle, recv_handle, handle) }),
+        appinfo,
+        tokio::spawn(async move {
+            tokio::try_join!(handle, notify_handle).unwrap();
+        }),
     ))
 }
 
-async fn login(app_config: AppConfig<ConfigWithLock>) -> bool {
-    let url = match get_index_page(false).await {
-        Ok(url) => url,
-        Err(e) => {
-            eprintln!("Get index page error: {}", e);
-            return false;
-        }
-    };
-    app_config.config().write().await.set_last_url(&url.url);
-    let _ = app_config.save().await;
-    let auth_info = match get_auth_info(&url).await {
-        Ok(auth_info) => auth_info,
-        Err(e) => {
-            eprintln!("Get auth info error: {}", e);
-            return false;
-        }
-    };
-    if let Err(e) = auth(
-        url,
-        auth_info,
-        app_config.config().read().await.user().unwrap(),
-    )
-    .await
-    {
-        eprintln!("Auth error: {}", e);
-        return false;
-    };
+pub async fn login_net(user: &UserInfo) -> Result<(), AuthError> {
+    let url = get_index_page(false).await?;
+    let auth_info = get_auth_info(&url).await?;
+    auth(url, auth_info, user).await
+}
+
+struct LoginUrls {
+    logout_url_base: String,
+    last_url: String,
+}
+
+async fn login(user: UserInfo) -> Result<LoginUrls, AuthError> {
+    let url = get_index_page(false).await?;
+    let auth_info = get_auth_info(&url).await?;
+    let last_url = url.url.clone();
+    let logout_url = auth_info.logout_url_root.clone();
+    auth(url, auth_info, &user).await?;
     println!("connected to htu-net");
     #[cfg(feature = "sys-notify")]
     notify("已连接到校园网").await;
-    true
+    Ok(LoginUrls {
+        logout_url_base: logout_url,
+        last_url,
+    })
 }

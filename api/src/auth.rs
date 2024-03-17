@@ -79,7 +79,13 @@ pub struct AuthInfo {
 
 fn get_js_auth_info(js: &str) -> AuthInfo {
     let auth_url = get_variable_value(js, "authApiUrl").unwrap();
-    let logout_root = get_root_url(auth_url).split(':').collect::<Vec<&str>>()[0].to_string();
+    let logout_root = {
+        let root = get_root_url(auth_url);
+        root[..root.rfind(':').unwrap()].to_string()
+    };
+    #[cfg(debug_assertions)]
+    println!("Logout Root: {}", logout_root);
+
     AuthInfo {
         logout_url_root: logout_root,
         auth_url: auth_url.into(),
@@ -89,12 +95,21 @@ fn get_js_auth_info(js: &str) -> AuthInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub enum Suffix {
     ChinaMobie,
     ChinaUnicom,
     ChinaTelecom,
     Local,
+}
+
+impl Serialize for Suffix {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.to_str())
+    }
 }
 
 impl Suffix {
@@ -109,6 +124,22 @@ impl Suffix {
             Suffix::ChinaUnicom => Self::CU,
             Suffix::ChinaTelecom => Self::CT,
             Suffix::Local => Self::LOCAL,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Suffix {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            Self::CM => Ok(Self::ChinaMobie),
+            Self::CU => Ok(Self::ChinaUnicom),
+            Self::CT => Ok(Self::ChinaTelecom),
+            Self::LOCAL => Ok(Self::Local),
+            _ => Err(serde::de::Error::custom("Invalid Suffix")),
         }
     }
 }
@@ -130,15 +161,20 @@ impl ToString for Suffix {
     }
 }
 
+pub trait Response: Display + Debug + Send + Sync {}
+
+impl Response for serde_json::Value {}
+impl Response for String {}
+
 #[derive(Debug)]
-pub enum AuthError<T> {
+pub enum AuthError {
     ReqError(reqwest::Error),
-    InvalidResponse(T),
+    InvalidResponse(Box<dyn Response>),
     AuthFailed { msg: String },
     Authed,
 }
 
-impl<T: Display> Display for AuthError<T> {
+impl Display for AuthError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             AuthError::ReqError(e) => write!(f, "Request Error: {}", e),
@@ -164,7 +200,7 @@ pub mod auth_async {
 
     use super::*;
 
-    pub async fn get_index_page(ping: bool) -> Result<IndexUrl, AuthError<String>> {
+    pub async fn get_index_page(ping: bool) -> Result<IndexUrl, AuthError> {
         if ping && ping_async("www.baidu.com", 80).await.is_ok() {
             return Err(AuthError::Authed);
         }
@@ -175,17 +211,18 @@ pub mod auth_async {
             .text()
             .await
             .map_err(AuthError::ReqError)?;
-        parse_index_page(&resp).ok_or(AuthError::InvalidResponse(resp))
+        parse_index_page(&resp).ok_or(AuthError::InvalidResponse(Box::new(resp)))
     }
 
-    pub async fn get_auth_info(index_url: &IndexUrl) -> Result<AuthInfo, AuthError<String>> {
+    pub async fn get_auth_info(index_url: &IndexUrl) -> Result<AuthInfo, AuthError> {
         let resp = reqwest::get(index_url.url.clone())
             .await
             .map_err(AuthError::ReqError)?
             .text()
             .await
             .map_err(AuthError::ReqError)?;
-        let js_url = get_js_url(&resp).ok_or_else(|| AuthError::InvalidResponse(resp.clone()))?;
+        let js_url =
+            get_js_url(&resp).ok_or_else(|| AuthError::InvalidResponse(Box::new(resp.clone())))?;
         #[cfg(debug_assertions)]
         println!("JS URL: {}", js_url);
 
@@ -204,7 +241,7 @@ pub mod auth_async {
         index_url: IndexUrl,
         auth_info: AuthInfo,
         user: &UserInfo,
-    ) -> Result<(), AuthError<serde_json::Value>> {
+    ) -> Result<(), AuthError> {
         let client = Client::new();
         // first auth
         let resp = client
@@ -235,7 +272,7 @@ pub mod auth_async {
                 });
             }
         } else {
-            return Err(AuthError::InvalidResponse(resp));
+            return Err(AuthError::InvalidResponse(Box::new(resp)));
         }
 
         // quick auth
@@ -271,7 +308,7 @@ pub mod auth_async {
                 });
             }
         } else {
-            Err(AuthError::InvalidResponse(resp))
+            Err(AuthError::InvalidResponse(Box::new(resp)))
         }
     }
 
@@ -310,7 +347,7 @@ pub mod auth_blocking {
 
     use super::*;
 
-    pub fn get_index_page(ping_check: bool) -> Result<IndexUrl, AuthError<String>> {
+    pub fn get_index_page(ping_check: bool) -> Result<IndexUrl, AuthError> {
         use crate::tool::ping;
 
         if ping_check && ping("www.baidu.com", 80).is_ok() {
@@ -321,15 +358,16 @@ pub mod auth_blocking {
             .text()
             .map_err(AuthError::ReqError)?;
 
-        parse_index_page(&resp).ok_or(AuthError::InvalidResponse(resp))
+        parse_index_page(&resp).ok_or(AuthError::InvalidResponse(Box::new(resp)))
     }
 
-    pub fn get_auth_info(index_url: &IndexUrl) -> Result<AuthInfo, AuthError<String>> {
+    pub fn get_auth_info(index_url: &IndexUrl) -> Result<AuthInfo, AuthError> {
         let resp = reqwest::blocking::get(index_url.url.clone())
             .map_err(AuthError::ReqError)?
             .text()
             .map_err(AuthError::ReqError)?;
-        let js_url = get_js_url(&resp).ok_or_else(|| AuthError::InvalidResponse(resp.clone()))?;
+        let js_url =
+            get_js_url(&resp).ok_or_else(|| AuthError::InvalidResponse(Box::new(resp.clone())))?;
         #[cfg(debug_assertions)]
         println!("JS URL: {}", js_url);
         Ok(get_js_auth_info(
@@ -346,7 +384,7 @@ pub mod auth_blocking {
         index_url: IndexUrl,
         auth_info: AuthInfo,
         user: &UserInfo,
-    ) -> Result<(), AuthError<serde_json::Value>> {
+    ) -> Result<(), AuthError> {
         let client = reqwest::blocking::Client::new();
         // first auth
         let resp = client
@@ -374,7 +412,7 @@ pub mod auth_blocking {
                 });
             }
         } else {
-            return Err(AuthError::InvalidResponse(resp));
+            return Err(AuthError::InvalidResponse(Box::new(resp)));
         }
         // quick auth
         let resp = client
@@ -406,7 +444,7 @@ pub mod auth_blocking {
                 })
             }
         } else {
-            Err(AuthError::InvalidResponse(resp))
+            Err(AuthError::InvalidResponse(Box::new(resp)))
         }
     }
 
