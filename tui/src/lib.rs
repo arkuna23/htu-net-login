@@ -7,7 +7,7 @@ use std::{
     panic, result,
 };
 
-use component::border::AppContainer;
+use component::container::AppContainer;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},

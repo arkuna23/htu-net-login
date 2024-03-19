@@ -54,7 +54,9 @@ impl Server {
                 let remote_addr = conn.remote_addr();
                 async move {
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
-                        println!("{} {} from {}", req.method(), req.uri().path(), remote_addr);
+                        if req.uri().path() != "/" {
+                            println!("{} {} from {}", req.method(), req.uri().path(), remote_addr);
+                        }
                         Self::router(req, conf.clone())
                     }))
                 }

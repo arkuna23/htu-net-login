@@ -10,64 +10,33 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
     time::{sleep, Instant},
 };
 
 use crate::{
     component::Component,
-    data::{Action, AppError, Signal},
+    data::{Action, AppError, Signal, UserInfo},
     Result, TuiTerminal,
 };
 
-pub fn term_event_loop(
-    tx: UnboundedSender<Signal>,
+pub async fn term_event_loop(
+    tx: UnboundedSender<Event>,
     is_exited: Arc<AtomicBool>,
     tick_rate: u16,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut prev = Instant::now();
-        loop {
-            if is_exited.load(Ordering::SeqCst) {
-                break;
-            };
-            let has_event = event::poll(
-                Duration::from_secs_f64(1f64 / (tick_rate as f64)) - (Instant::now() - prev),
-            )
-            .unwrap();
-            prev = Instant::now();
-            if has_event {
-                tx.send(term_event_map(event::read().unwrap()).await)
-                    .unwrap();
-            }
+) {
+    let mut prev = Instant::now();
+    loop {
+        if is_exited.load(Ordering::SeqCst) {
+            break;
+        };
+        let has_event = event::poll(
+            Duration::from_secs_f64(1f64 / (tick_rate as f64)) - (Instant::now() - prev),
+        )
+        .unwrap();
+        prev = Instant::now();
+        if has_event {
+            tx.send(event::read().unwrap()).unwrap();
         }
-    })
-}
-
-async fn term_event_map(event: Event) -> Signal {
-    match event {
-        Event::Key(key) => {
-            if let Some(sig) = keymap(key).await {
-                sig
-            } else {
-                Signal::TermEvent(event)
-            }
-        }
-        Event::Resize(c, r) => Signal::Resize(c, r),
-        _ => Signal::TermEvent(event),
-    }
-}
-
-async fn keymap(event: KeyEvent) -> Option<Signal> {
-    match event.code {
-        KeyCode::Char('q') => {
-            if event.modifiers.contains(KeyModifiers::CONTROL) {
-                Some(Signal::Exit)
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }
 
@@ -77,22 +46,36 @@ pub async fn run_handler(
     frame_rate: u16,
     tick_rate: u16,
 ) -> Result<()> {
-    let (sig_tx, sig_rx) = mpsc::unbounded_channel();
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
     let exit_mark = Arc::new(AtomicBool::new(false));
-    let _term_event = term_event_loop(sig_tx.clone(), exit_mark.clone(), tick_rate);
-    run_action_handler(terminal, component, sig_tx, sig_rx, exit_mark, frame_rate).await
+    tokio::spawn(term_event_loop(event_tx, exit_mark.clone(), tick_rate));
+    let (tick_tx, tick_rx) = mpsc::unbounded_channel();
+    tokio::spawn(tick_handler(tick_rate, tick_tx, exit_mark.clone()));
+    run_action_handler(
+        terminal, component, tick_rx, event_rx, exit_mark, frame_rate,
+    )
+    .await
 }
 
-pub async fn run_action_handler(
+async fn tick_handler(tick_rate: u16, tx: UnboundedSender<()>, exit_mark: Arc<AtomicBool>) {
+    let duration = Duration::from_secs_f64(1f64 / (tick_rate as f64));
+    while !exit_mark.load(Ordering::SeqCst) {
+        tx.send(()).unwrap();
+        sleep(duration).await;
+    }
+}
+
+async fn run_action_handler(
     mut terminal: TuiTerminal,
     mut component: impl Component,
-    signal_tx: UnboundedSender<Signal>,
-    mut signal_rx: UnboundedReceiver<Signal>,
+    mut tick_rx: UnboundedReceiver<()>,
+    mut event_rx: UnboundedReceiver<Event>,
     exit_mark: Arc<AtomicBool>,
     frame_rate: u16,
 ) -> Result<()> {
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<Signal>();
     let (act_tx, mut act_rx) = mpsc::unbounded_channel();
-    component.init()?;
+    let _info = component.init()?;
     component.register_action_sender(act_tx.clone())?;
     let mut prev;
     let mut size = None;
@@ -101,15 +84,35 @@ pub async fn run_action_handler(
         while let Ok(e) = signal_rx.try_recv() {
             match e {
                 Signal::Exit => {
+                    component.handle_signal(e)?;
                     exit_mark.store(true, Ordering::SeqCst);
                     return Ok(());
                 }
-                Signal::Error(e) => {
-                    return Err(e);
-                }
-                Signal::Resize(c, r) => size = Some((c, r)),
                 _ => component.handle_signal(e)?,
             }
+        }
+
+        while let Ok(e) = event_rx.try_recv() {
+            match e {
+                Event::Key(key) => {
+                    if let Some(signal) = handle_key(key).await {
+                        signal_tx.send(signal).unwrap();
+                    } else if _info.key_enabled {
+                        component.handle_key(key)?;
+                    }
+                }
+                Event::Resize(c, r) => {
+                    size = Some((c, r));
+                }
+                Event::Mouse(mouse) if _info.mouse_enabled => {
+                    component.handle_mouse(mouse)?;
+                }
+                _ => {}
+            }
+        }
+
+        if tick_rx.try_recv().is_ok() {
+            component.tick()?;
         }
 
         if let Some((c, r)) = size {
@@ -126,15 +129,47 @@ pub async fn run_action_handler(
                     terminal
                         .draw(|f| {
                             if let Err(e) = component.draw(f, f.size()) {
-                                signal_tx.send(Signal::Error(e)).unwrap();
+                                signal_tx.send(Signal::DrawError(e)).unwrap();
                             }
                         })
                         .map_err(AppError::StdIo)?;
                 }
                 Action::Quit => signal_tx.send(Signal::Exit).unwrap(),
+                Action::PingDaemon => {
+                    let signal_tx = signal_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(resp) = reqwest::get("http://127.0.0.1:11451/").await {
+                            if resp.status().is_success() {
+                                signal_tx.send(Signal::DaemonPong).unwrap();
+                            }
+                        }
+                    });
+                }
+                Action::GetUser => {
+                    let signal_tx = signal_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(resp) = reqwest::get("http://127.0.0.1:11451/user").await {
+                            if let Ok(user) = resp.json::<UserInfo>().await {
+                                signal_tx.send(Signal::UserInfo(user)).unwrap();
+                            }
+                        }
+                    });
+                }
+                Action::SelectInput(id) => signal_tx.send(Signal::InputSelected(id)).unwrap(),
             };
         }
 
         sleep(Duration::from_secs_f64(1f64 / (frame_rate as f64)) - (Instant::now() - prev)).await;
+    }
+}
+
+async fn handle_key(key: KeyEvent) -> Option<Signal> {
+    if key.modifiers == KeyModifiers::CONTROL {
+        match key.code {
+            KeyCode::Char('q') => Some(Signal::Exit),
+            _ => None,
+        }
+    } else {
+        None
     }
 }

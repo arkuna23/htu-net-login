@@ -71,14 +71,15 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
                 .run_until(async move {
                     println!("running login thread");
                     task::spawn_local(async move {
+                        let mut success = true;
                         loop {
                             if appinfo.running().await {
                                 if check_autewifi(&client).await {
                                     let user = appinfo.read().await.config().user().cloned();
                                     if let Some(user) = user {
-                                        println!("autewifi detected, trying to login");
                                         match login(user).await {
                                             Ok(url) => {
+                                                success = true;
                                                 let mut appinfo_write = appinfo.write().await;
                                                 appinfo_write
                                                     .config_mut()
@@ -90,7 +91,20 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
                                                 let _ = appinfo.read().await.save().await;
                                                 println!("login success");
                                             }
-                                            Err(e) => eprintln!("login error: {}", e),
+                                            Err(e) => {
+                                                if let AuthError::AuthFailed { msg } = e {
+                                                    if success {
+                                                        #[cfg(feature = "sys-notify")]
+                                                        notify(&format!("登录失败: {}", msg)).await;
+                                                        eprintln!("login error: {}", msg);
+                                                        success = false;
+                                                    }
+                                                    time::sleep(Duration::from_secs(2)).await;
+                                                    continue;
+                                                }
+
+                                                eprintln!("login error: {}", e);
+                                            }
                                         };
                                     } else {
                                         time::sleep(Duration::from_secs(1)).await;

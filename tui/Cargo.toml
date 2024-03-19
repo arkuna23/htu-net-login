@@ -9,3 +9,7 @@ edition = "2021"
 tokio = { version = "*", default-features = false, features = ["rt", "macros"] }
 crossterm = { version = "*", default-features = false, features = ["events"] }
 ratatui = { version = "*", default-features = false, features = ["crossterm"] }
+reqwest = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = { version = "*" }
+lazy_static = "*"
