@@ -16,15 +16,15 @@ use tokio::{
     time::{self, Instant},
 };
 
-use crate::data::{Action, AppState, Signal};
+use crate::data::{Action, Signal};
 
 use super::{form::UserForm, Component, ComponentInfo};
 
 #[derive(Default)]
 pub struct Page {
     action_tx: Option<UnboundedSender<Action>>,
-    app_state: AppState,
-    user_form: Option<UserForm>,
+    inner_info: ComponentInfo,
+    inner: Box<dyn Component>,
     last_pong: Option<Instant>,
     mouse_area: Rect,
     exit_state: Arc<AtomicBool>,
@@ -34,18 +34,14 @@ pub struct Page {
 impl Component for Page {
     fn init(&mut self) -> crate::Result<super::ComponentInfo> {
         let mut form = UserForm::default();
-        form.init()?;
-        self.user_form = Some(form);
+        self.inner_info = form.init()?;
+        self.inner = Box::new(form);
         Ok(ComponentInfo::all_enabled())
     }
 
     fn register_action_sender(&mut self, sender: UnboundedSender<Action>) -> crate::Result<()> {
         let tx = sender.clone();
-        #[cfg(debug_assertions)]
-        self.user_form
-            .as_mut()
-            .unwrap()
-            .register_action_sender(sender.clone())?;
+        self.inner.register_action_sender(sender.clone())?;
         self.action_tx = Some(sender);
         let state = self.exit_state.clone();
         tokio::spawn(async move {
@@ -74,11 +70,7 @@ impl Component for Page {
             .centered(),
             layout[1],
         );
-
-        match self.app_state {
-            AppState::ManageUser => self.user_form.as_mut().unwrap().draw(f, layout[0])?,
-            _ => (),
-        };
+        self.inner.draw(f, layout[0])?;
 
         Ok(())
     }
@@ -92,11 +84,9 @@ impl Component for Page {
                 self.exit_state
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            Signal::InputSelected(_) | Signal::UserInfo(_) => {
-                self.user_form.as_mut().unwrap().handle_signal(signal)?;
-            }
             _ => (),
         };
+        self.inner.handle_signal(signal)?;
 
         Ok(())
     }
@@ -122,27 +112,21 @@ impl Component for Page {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> crate::Result<()> {
-        match self.app_state {
-            AppState::ManageUser => self.user_form.as_mut().unwrap().handle_key(key)?,
-            AppState::Load => (),
-            AppState::Menu => (),
-        };
+        if self.inner_info.key_enabled {
+            self.inner.handle_key(key)?;
+        }
         Ok(())
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> crate::Result<()> {
-        match self.app_state {
-            AppState::ManageUser => {
-                let form = self.user_form.as_mut().unwrap();
-                if form
-                    .mouse_area()
-                    .contains(Position::new(mouse.column, mouse.row))
-                {
-                    form.handle_mouse(mouse)?;
-                }
-            }
-            _ => (),
-        };
+        if self.inner_info.mouse_enabled
+            && self
+                .inner
+                .mouse_area()
+                .contains(Position::new(mouse.column, mouse.row))
+        {
+            self.inner.handle_mouse(mouse)?;
+        }
 
         Ok(())
     }

@@ -1,6 +1,5 @@
 pub mod container;
 pub mod form;
-pub mod input;
 pub mod page;
 pub mod util;
 
@@ -20,7 +19,7 @@ pub struct ComponentInfo {
 }
 
 #[allow(unused_variables)]
-pub trait Component: Default {
+pub trait Component {
     fn init(&mut self) -> Result<ComponentInfo> {
         Ok(ComponentInfo::default())
     }
@@ -60,5 +59,15 @@ impl ComponentInfo {
             mouse_enabled: true,
             key_enabled: true,
         }
+    }
+}
+
+pub struct EmptyComponent;
+
+impl Component for EmptyComponent {}
+
+impl Default for Box<dyn Component> {
+    fn default() -> Self {
+        Box::new(EmptyComponent)
     }
 }

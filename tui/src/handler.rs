@@ -8,6 +8,7 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use reqwest::Client;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     time::{sleep, Instant},
@@ -15,7 +16,7 @@ use tokio::{
 
 use crate::{
     component::Component,
-    data::{Action, AppError, Signal, UserInfo},
+    data::{Action, AppError, SetUserError, Signal, UserInfo},
     Result, TuiTerminal,
 };
 
@@ -156,6 +157,41 @@ async fn run_action_handler(
                     });
                 }
                 Action::SelectInput(id) => signal_tx.send(Signal::InputSelected(id)).unwrap(),
+                Action::SelectCheckbox(id) => signal_tx.send(Signal::CheckboxSelected(id)).unwrap(),
+                Action::SetUser(user) => {
+                    let signal_tx = signal_tx.clone();
+                    tokio::spawn(async move {
+                        let client = Client::default();
+                        let res = client
+                            .post("http://127.0.0.1:11451/user")
+                            .json(&user)
+                            .send()
+                            .await;
+                        match res {
+                            Ok(resp) => {
+                                if resp.status().is_success() {
+                                    signal_tx.send(Signal::UserInfoSet(Ok(()))).unwrap();
+                                } else {
+                                    match resp.json::<serde_json::Value>().await {
+                                        Ok(json) => signal_tx
+                                            .send(Signal::UserInfoSet(Err(
+                                                SetUserError::ErrMessage(json),
+                                            )))
+                                            .unwrap(),
+                                        Err(e) => signal_tx
+                                            .send(Signal::UserInfoSet(Err(SetUserError::Reqwest(
+                                                e,
+                                            ))))
+                                            .unwrap(),
+                                    };
+                                }
+                            }
+                            Err(e) => signal_tx
+                                .send(Signal::UserInfoSet(Err(SetUserError::Reqwest(e))))
+                                .unwrap(),
+                        };
+                    });
+                }
             };
         }
 

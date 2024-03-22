@@ -43,7 +43,7 @@ pub fn centered_box_percentage(rect: Rect, x_percent: u16, y_percent: u16) -> Re
     y_layout[1]
 }
 
-pub fn mouse_contains<'a, T: Component>(
+pub fn mouse_contains_option<'a, T: Component>(
     mouse: &MouseEvent,
     component: Option<&'a mut T>,
 ) -> (bool, &'a mut T) {
@@ -53,4 +53,9 @@ pub fn mouse_contains<'a, T: Component>(
             .contains(Position::new(mouse.column, mouse.row)),
         com,
     )
+}
+
+pub fn mouse_contains(mouse: &MouseEvent, com: &impl Component) -> bool {
+    com.mouse_area()
+        .contains(Position::new(mouse.column, mouse.row))
 }

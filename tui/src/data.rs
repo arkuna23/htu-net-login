@@ -26,7 +26,7 @@ pub struct UserInfo {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Suffix {
-    ChinaMobie,
+    ChinaMobile,
     ChinaUnicom,
     ChinaTelecom,
     Local,
@@ -55,7 +55,7 @@ impl Suffix {
 
     pub fn to_str(&self) -> &str {
         match self {
-            Suffix::ChinaMobie => Self::CM,
+            Suffix::ChinaMobile => Self::CM,
             Suffix::ChinaUnicom => Self::CU,
             Suffix::ChinaTelecom => Self::CT,
             Suffix::Local => Self::LOCAL,
@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for Suffix {
     {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
-            Self::CM => Ok(Self::ChinaMobie),
+            Self::CM => Ok(Self::ChinaMobile),
             Self::CU => Ok(Self::ChinaUnicom),
             Self::CT => Ok(Self::ChinaTelecom),
             Self::LOCAL => Ok(Self::Local),
@@ -85,10 +85,18 @@ impl ToString for Suffix {
     }
 }
 
+pub enum SetUserError {
+    Reqwest(reqwest::Error),
+    ErrMessage(serde_json::Value),
+    SerdeJson(serde_json::Error),
+}
+
 pub enum Signal {
     DrawError(AppError),
     UserInfo(UserInfo),
     InputSelected(u16),
+    CheckboxSelected(u16),
+    UserInfoSet(Result<(), SetUserError>),
     DaemonPong,
     Exit,
 }
@@ -99,16 +107,6 @@ pub enum Action {
     Quit,
     GetUser,
     SelectInput(u16),
-}
-
-pub enum AppState {
-    Load,
-    Menu,
-    ManageUser,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::ManageUser
-    }
+    SelectCheckbox(u16),
+    SetUser(UserInfo),
 }
