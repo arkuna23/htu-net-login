@@ -1,6 +1,7 @@
 use std::{error::Error, fmt::Display, io};
 
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 #[derive(Debug)]
 pub enum AppError {
@@ -85,10 +86,20 @@ impl ToString for Suffix {
     }
 }
 
-pub enum SetUserError {
+pub enum AppPage {
+    Menu,
+    Form,
+}
+
+#[derive(Debug)]
+pub enum DaemonError {
     Reqwest(reqwest::Error),
     ErrMessage(serde_json::Value),
-    SerdeJson(serde_json::Error),
+}
+
+pub enum DaemonRequest {
+    Logout,
+    SetAccount,
 }
 
 pub enum Signal {
@@ -96,17 +107,46 @@ pub enum Signal {
     UserInfo(UserInfo),
     InputSelected(u16),
     CheckboxSelected(u16),
-    UserInfoSet(Result<(), SetUserError>),
+    DaemonResponse {
+        req: DaemonRequest,
+        result: Result<(), DaemonError>,
+    },
     DaemonPong,
+    ChangePage(AppPage),
     Exit,
 }
 
 pub enum Action {
     PingDaemon,
+    Logout,
+    JumpTo(AppPage),
     Draw,
     Quit,
-    GetUser,
+    GetAccount,
     SelectInput(u16),
     SelectCheckbox(u16),
-    SetUser(UserInfo),
+    SetAccount(UserInfo),
+}
+
+#[derive(Debug)]
+pub enum Level {
+    Error,
+    Info,
+}
+
+#[derive(Debug)]
+pub struct Notification {
+    pub level: Level,
+    pub msg: String,
+    pub time: Instant,
+}
+
+impl Notification {
+    pub fn new(level: Level, msg: impl Into<String>) -> Self {
+        Self {
+            level,
+            msg: msg.into(),
+            time: Instant::now(),
+        }
+    }
 }

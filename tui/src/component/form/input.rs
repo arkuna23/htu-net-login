@@ -20,6 +20,7 @@ pub struct Input {
     action_tx: Option<UnboundedSender<Action>>,
     name: String,
     selected: bool,
+    password: bool,
 }
 
 lazy_static! {
@@ -35,6 +36,7 @@ impl Default for Input {
             action_tx: None,
             selected: Default::default(),
             mouse_area: Default::default(),
+            password: false,
         }
     }
 }
@@ -48,6 +50,7 @@ impl Input {
             name: name.into(),
             selected: Default::default(),
             mouse_area: Default::default(),
+            password: false,
         }
     }
 }
@@ -77,13 +80,19 @@ impl Component for Input {
             .split(rect);
 
         f.render_widget(self.name().white().bold(), layout[0]);
-        let text = if self.content().len() < 16 {
-            self.content().to_owned() + " ".repeat(16 - self.content().len()).as_str()
-        } else if self.selected {
-            self.content()[self.content().len() - 16..].to_owned()
+
+        let mut text = if self.password {
+            "*".repeat(self.content().len())
         } else {
-            self.content()[0..16].to_owned()
+            self.content().into()
         };
+        if text.len() < 16 {
+            text += " ".repeat(16 - self.content().len()).as_str();
+        } else if self.selected {
+            text = text[self.content().len() - 16..].to_owned();
+        } else {
+            text = text[0..16].to_owned();
+        }
 
         let span = if self.selected {
             text.white().on_dark_gray()
@@ -132,7 +141,6 @@ impl Component for Input {
     fn handle_signal(&mut self, signal: crate::data::Signal) -> crate::Result<()> {
         if let Signal::InputSelected(id) = signal {
             self.selected = id == self.id();
-            self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
         }
 
         Ok(())
@@ -146,6 +154,10 @@ impl Component for Input {
 impl Input {
     pub fn content(&self) -> &str {
         self.content.as_str()
+    }
+
+    pub fn toggle_password(&mut self) {
+        self.password = !self.password;
     }
 
     pub fn content_mut(&mut self) -> &mut String {
@@ -166,5 +178,9 @@ impl Input {
 
     pub fn toggle_select(&mut self) {
         self.selected = !self.selected;
+    }
+
+    pub fn length(&self) -> u16 {
+        self.name.len() as u16 + 1 + 16
     }
 }

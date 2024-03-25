@@ -67,6 +67,7 @@ impl Component for AppContainer {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title(Line::from("HTU NET LOGIN").centered())
+            .title_bottom(Line::from("<Ctrl> + <q> 退出程序").centered())
             .border_style(Style::default().red());
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);

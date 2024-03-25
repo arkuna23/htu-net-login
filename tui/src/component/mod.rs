@@ -1,5 +1,6 @@
 pub mod container;
 pub mod form;
+pub mod menu;
 pub mod page;
 pub mod util;
 

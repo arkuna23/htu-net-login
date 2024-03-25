@@ -8,21 +8,23 @@ use std::{
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::Stylize,
-    text::Line,
+    style::{Style, Stylize},
+    text::{Line, Text},
+    widgets::{Block, BorderType, Paragraph},
 };
 use tokio::{
     sync::mpsc::UnboundedSender,
     time::{self, Instant},
 };
 
-use crate::data::{Action, Signal};
+use crate::data::{Action, AppPage, DaemonRequest, Level, Notification, Signal};
 
-use super::{form::UserForm, Component, ComponentInfo};
+use super::{form::AccountForm, menu::Menu, util::str_to_lines, Component, ComponentInfo};
 
 #[derive(Default)]
 pub struct Page {
     action_tx: Option<UnboundedSender<Action>>,
+    notification: Option<Notification>,
     inner_info: ComponentInfo,
     inner: Box<dyn Component>,
     last_pong: Option<Instant>,
@@ -33,9 +35,9 @@ pub struct Page {
 
 impl Component for Page {
     fn init(&mut self) -> crate::Result<super::ComponentInfo> {
-        let mut form = UserForm::default();
-        self.inner_info = form.init()?;
-        self.inner = Box::new(form);
+        let mut menu = Menu::default();
+        self.inner_info = menu.init()?;
+        self.inner = Box::new(menu);
         Ok(ComponentInfo::all_enabled())
     }
 
@@ -72,11 +74,40 @@ impl Component for Page {
         );
         self.inner.draw(f, layout[0])?;
 
+        if let Some(notification) = self.notification.as_ref() {
+            let noti_lay =
+                Layout::horizontal([Constraint::Min(0), Constraint::Min(0), Constraint::Min(0)])
+                    .split(layout[0])[2];
+            let block = Block::bordered().border_type(BorderType::Rounded);
+            let lines = {
+                let mut v = vec![Line::from({
+                    match notification.level {
+                        Level::Info => "信息".bold().green(),
+                        Level::Error => "错误".bold().red(),
+                    }
+                })
+                .left_aligned()];
+                str_to_lines(
+                    notification.msg.as_str(),
+                    noti_lay.width - 2,
+                    Style::default(),
+                    &mut v,
+                );
+                v
+            };
+
+            let noti_layout =
+                Layout::vertical([Constraint::Length(lines.len() as u16 + 2)]).split(noti_lay);
+            f.render_widget(
+                Paragraph::new(Text::from(lines)).block(block),
+                noti_layout[0],
+            );
+        }
         Ok(())
     }
 
     fn handle_signal(&mut self, signal: crate::data::Signal) -> crate::Result<()> {
-        match signal {
+        match &signal {
             Signal::DaemonPong => {
                 self.last_pong = Some(Instant::now());
             }
@@ -84,6 +115,27 @@ impl Component for Page {
                 self.exit_state
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
+            Signal::ChangePage(page) => {
+                let mut com: Box<dyn Component> = match page {
+                    AppPage::Menu => Box::<Menu>::default(),
+                    AppPage::Form => Box::<AccountForm>::default(),
+                };
+                com.init()?;
+                com.register_action_sender(self.action_tx.as_ref().unwrap().clone())
+                    .unwrap();
+                self.inner = com;
+                self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
+            }
+            Signal::DaemonResponse { req, result } => match req {
+                DaemonRequest::SetAccount => match result {
+                    Ok(_) => self.popup_notification(Level::Info, "账号信息设置成功".into()),
+                    Err(e) => self.popup_notification(Level::Error, format!("{:?}", e)),
+                },
+                DaemonRequest::Logout => match result {
+                    Ok(_) => self.popup_notification(Level::Info, "登出成功".into()),
+                    Err(e) => self.popup_notification(Level::Error, format!("{:?}", e)),
+                },
+            },
             _ => (),
         };
         self.inner.handle_signal(signal)?;
@@ -98,11 +150,18 @@ impl Component for Page {
                 new_state = true;
             }
         }
-
         if new_state != self.connected {
             self.connected = new_state;
             self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
         }
+
+        if let Some(n) = self.notification.as_ref() {
+            if Instant::now().duration_since(n.time).as_secs() > 3 {
+                self.notification = None;
+                self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
+            }
+        }
+        self.inner.tick()?;
 
         Ok(())
     }
@@ -129,5 +188,12 @@ impl Component for Page {
         }
 
         Ok(())
+    }
+}
+
+impl Page {
+    pub fn popup_notification(&mut self, level: Level, msg: String) {
+        self.notification = Some(Notification::new(level, msg));
+        self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
     }
 }

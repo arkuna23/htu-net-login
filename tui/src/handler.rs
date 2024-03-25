@@ -9,6 +9,7 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use reqwest::Client;
+use serde::Serialize;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     time::{sleep, Instant},
@@ -16,7 +17,7 @@ use tokio::{
 
 use crate::{
     component::Component,
-    data::{Action, AppError, SetUserError, Signal, UserInfo},
+    data::{Action, AppError, DaemonError, DaemonRequest, Signal, UserInfo},
     Result, TuiTerminal,
 };
 
@@ -25,16 +26,12 @@ pub async fn term_event_loop(
     is_exited: Arc<AtomicBool>,
     tick_rate: u16,
 ) {
-    let mut prev = Instant::now();
+    let duration = Duration::from_secs_f64(1f64 / (tick_rate as f64));
     loop {
         if is_exited.load(Ordering::SeqCst) {
             break;
         };
-        let has_event = event::poll(
-            Duration::from_secs_f64(1f64 / (tick_rate as f64)) - (Instant::now() - prev),
-        )
-        .unwrap();
-        prev = Instant::now();
+        let has_event = event::poll(duration).unwrap();
         if has_event {
             tx.send(event::read().unwrap()).unwrap();
         }
@@ -146,7 +143,7 @@ async fn run_action_handler(
                         }
                     });
                 }
-                Action::GetUser => {
+                Action::GetAccount => {
                     let signal_tx = signal_tx.clone();
                     tokio::spawn(async move {
                         if let Ok(resp) = reqwest::get("http://127.0.0.1:11451/user").await {
@@ -158,39 +155,26 @@ async fn run_action_handler(
                 }
                 Action::SelectInput(id) => signal_tx.send(Signal::InputSelected(id)).unwrap(),
                 Action::SelectCheckbox(id) => signal_tx.send(Signal::CheckboxSelected(id)).unwrap(),
-                Action::SetUser(user) => {
-                    let signal_tx = signal_tx.clone();
-                    tokio::spawn(async move {
-                        let client = Client::default();
-                        let res = client
-                            .post("http://127.0.0.1:11451/user")
-                            .json(&user)
-                            .send()
-                            .await;
-                        match res {
-                            Ok(resp) => {
-                                if resp.status().is_success() {
-                                    signal_tx.send(Signal::UserInfoSet(Ok(()))).unwrap();
-                                } else {
-                                    match resp.json::<serde_json::Value>().await {
-                                        Ok(json) => signal_tx
-                                            .send(Signal::UserInfoSet(Err(
-                                                SetUserError::ErrMessage(json),
-                                            )))
-                                            .unwrap(),
-                                        Err(e) => signal_tx
-                                            .send(Signal::UserInfoSet(Err(SetUserError::Reqwest(
-                                                e,
-                                            ))))
-                                            .unwrap(),
-                                    };
-                                }
-                            }
-                            Err(e) => signal_tx
-                                .send(Signal::UserInfoSet(Err(SetUserError::Reqwest(e))))
-                                .unwrap(),
-                        };
-                    });
+                Action::SetAccount(user) => {
+                    send_daemon_request(
+                        "http://127.0.0.1:11451/user",
+                        Some(user),
+                        signal_tx.clone(),
+                        DaemonRequest::SetAccount,
+                        true,
+                    )
+                    .await
+                }
+                Action::JumpTo(page) => signal_tx.send(Signal::ChangePage(page)).unwrap(),
+                Action::Logout => {
+                    send_daemon_request::<UserInfo>(
+                        "http://127.0.0.1:11451/logout",
+                        None,
+                        signal_tx.clone(),
+                        DaemonRequest::Logout,
+                        false,
+                    )
+                    .await;
                 }
             };
         }
@@ -208,4 +192,60 @@ async fn handle_key(key: KeyEvent) -> Option<Signal> {
     } else {
         None
     }
+}
+
+async fn send_daemon_request<S: Serialize + Send + Sync + 'static>(
+    url: &str,
+    json: Option<S>,
+    signal_tx: UnboundedSender<Signal>,
+    req_type: DaemonRequest,
+    post: bool,
+) {
+    let url = url.to_owned();
+    tokio::spawn(async move {
+        let client = Client::default();
+        let res = if post {
+            match json {
+                Some(j) => client.post(url).json(&j),
+                None => client.post(url),
+            }
+        } else {
+            client.get(url)
+        }
+        .send()
+        .await;
+        match res {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    signal_tx
+                        .send(Signal::DaemonResponse {
+                            req: req_type,
+                            result: Ok(()),
+                        })
+                        .unwrap();
+                } else {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => signal_tx
+                            .send(Signal::DaemonResponse {
+                                req: req_type,
+                                result: Err(DaemonError::ErrMessage(json)),
+                            })
+                            .unwrap(),
+                        Err(e) => signal_tx
+                            .send(Signal::DaemonResponse {
+                                req: req_type,
+                                result: Err(DaemonError::Reqwest(e)),
+                            })
+                            .unwrap(),
+                    };
+                }
+            }
+            Err(e) => signal_tx
+                .send(Signal::DaemonResponse {
+                    req: req_type,
+                    result: Err(DaemonError::Reqwest(e)),
+                })
+                .unwrap(),
+        };
+    });
 }

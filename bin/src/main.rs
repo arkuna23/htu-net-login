@@ -12,7 +12,7 @@ struct Args {
 
     #[cfg(feature = "tui")]
     /// Tui min tick rate
-    #[arg(short, long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 20)]
     pub tick_rate: u16,
 
     #[cfg(feature = "tui")]
