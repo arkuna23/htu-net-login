@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lazy_static",
  "regex",
@@ -311,7 +311,7 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "bin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "daemon",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "api",
  "dirs",
@@ -2339,7 +2339,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "lazy_static",
