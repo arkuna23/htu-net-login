@@ -49,6 +49,7 @@ pub(crate) trait AppConfig: Sized {
     fn config(&self) -> &Config;
     fn config_mut(&mut self) -> &mut Config;
     fn config_path(&self) -> &PathBuf;
+    #[allow(dead_code)]
     fn config_path_mut(&mut self) -> &mut PathBuf;
 
     async fn get_or_create_path() -> io::Result<(PathBuf, bool)> {

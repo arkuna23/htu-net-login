@@ -2,8 +2,8 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "htu-net-login")]
-#[command(version = "0.1.0")]
-#[command(about = "A simple program to manage school net connection", long_about = None)]
+#[command(version = "0.1.1")]
+#[command(about = "A simple program to manage school network connection", long_about = None)]
 struct Args {
     #[cfg(all(feature = "daemon", feature = "tui"))]
     /// Run daemon server
@@ -32,6 +32,7 @@ async fn main() {
             .await
             .unwrap();
     }
+
     #[cfg(all(feature = "daemon", not(feature = "tui")))]
     daemon::start().await;
     #[cfg(all(not(feature = "daemon"), feature = "tui"))]

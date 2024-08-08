@@ -72,47 +72,43 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
                     println!("running login thread");
                     task::spawn_local(async move {
                         let mut success = true;
-                        loop {
-                            if appinfo.running().await {
-                                if check_autewifi(&client).await {
-                                    let user = appinfo.read().await.config().user().cloned();
-                                    if let Some(user) = user {
-                                        match login(user).await {
-                                            Ok(url) => {
-                                                success = true;
-                                                let mut appinfo_write = appinfo.write().await;
-                                                appinfo_write
-                                                    .config_mut()
-                                                    .set_last_url(url.last_url);
-                                                appinfo_write
-                                                    .config_mut()
-                                                    .set_logout_url_base(url.logout_url_base);
-                                                drop(appinfo_write);
-                                                let _ = appinfo.read().await.save().await;
-                                                println!("login success");
-                                            }
-                                            Err(e) => {
-                                                if let AuthError::AuthFailed { msg } = e {
-                                                    if success {
-                                                        #[cfg(feature = "sys-notify")]
-                                                        notify(&format!("登录失败: {}", msg)).await;
-                                                        eprintln!("login error: {}", msg);
-                                                        success = false;
-                                                    }
-                                                    time::sleep(Duration::from_secs(2)).await;
-                                                    continue;
-                                                }
-
-                                                eprintln!("login error: {}", e);
-                                            }
-                                        };
-                                    } else {
-                                        time::sleep(Duration::from_secs(1)).await;
-                                    };
-                                }
-                            } else {
-                                break;
+                        while appinfo.running().await {
+                            if !check_autewifi(&client).await {
+                                continue;
                             }
+
+                            let user = appinfo.read().await.config().user().cloned();
+                            let Some(user) = user else {
+                                time::sleep(Duration::from_secs(5)).await;
+                                continue;
+                            };
+                            match login(user).await {
+                                Ok(url) => {
+                                    success = true;
+                                    let mut appinfo_write = appinfo.write().await;
+                                    appinfo_write.config_mut().set_last_url(url.last_url);
+                                    appinfo_write
+                                        .config_mut()
+                                        .set_logout_url_base(url.logout_url_base);
+                                    drop(appinfo_write);
+                                    let _ = appinfo.read().await.save().await;
+                                    println!("login success");
+                                }
+                                Err(e) => {
+                                    let AuthError::AuthFailed { msg } = e else {
+                                        eprintln!("login error: {}", e);
+                                        continue;
+                                    };
+
+                                    if success {
+                                        #[cfg(feature = "sys-notify")]
+                                        notify(&format!("登录失败: {}", msg)).await;
+                                        eprintln!("login error: {}", msg);
+                                        success = false;
+                                    }
+                                    time::sleep(Duration::from_secs(5)).await;
+                                }
+                            };
                         }
                         println!("login thread exit");
                         #[cfg(feature = "auto-update")]

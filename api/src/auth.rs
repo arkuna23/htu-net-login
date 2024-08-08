@@ -155,9 +155,9 @@ impl Debug for Suffix {
     }
 }
 
-impl ToString for Suffix {
-    fn to_string(&self) -> String {
-        self.to_str().to_string()
+impl Display for Suffix {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.to_str())
     }
 }
 
