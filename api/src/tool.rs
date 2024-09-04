@@ -16,7 +16,7 @@ pub fn ping(host: &str, port: u16) -> std::io::Result<()> {
 #[cfg(feature = "async")]
 pub async fn ping_async(host: &str, port: u16) -> tokio::io::Result<()> {
     use std::time::Duration;
-    
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,

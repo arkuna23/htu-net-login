@@ -1,12 +1,13 @@
 [package]
-name = "daemon"
-version = "0.1.1"
+name = "htu-net-login-daemon"
+version = "0.1.2"
 edition = "2021"
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+log = "*"
 api = { path = "../api", features = ["async"] }
 hyper = { version = "*", default-features = false, features = ["server"] }
 tokio = { version = "*", default-features = false, features = [
@@ -25,8 +26,6 @@ dirs = "*"
 lazy_static = "*"
 
 [features]
-# default = ["auto-update"]
-# default = ["sys-notify"]
 default = ["auto-update", "sys-notify"]
 sys-notify = ["notify-rust"]
 auto-update = ["notify"]

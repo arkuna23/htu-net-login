@@ -55,7 +55,12 @@ impl Server {
                 async move {
                     Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
                         if req.uri().path() != "/" {
-                            println!("{} {} from {}", req.method(), req.uri().path(), remote_addr);
+                            log::info!(
+                                "{} {} from {}",
+                                req.method(),
+                                req.uri().path(),
+                                remote_addr
+                            );
                         }
                         Self::router(req, conf.clone())
                     }))
@@ -64,11 +69,11 @@ impl Server {
         let server = hyper::Server::bind(&addr).serve(make_svc);
         server
             .with_graceful_shutdown(async move {
-                println!("server thread running");
+                log::info!("server thread running");
                 while conf.running().await {
                     time::sleep(Duration::from_millis(250)).await;
                 }
-                println!("server thread exit");
+                log::info!("server thread exit");
             })
             .await
     }
@@ -78,7 +83,7 @@ impl Server {
         match Self::routes(req, conf).await {
             Ok(res) => Ok(res),
             Err(e) => {
-                eprintln!("error while processing {}: {}", path, e);
+                log::error!("error while processing {}: {}", path, e);
                 Ok(JsonResponse::bad_request("Internal Server Error").unwrap())
             }
         }
@@ -130,7 +135,7 @@ impl Server {
         if let Err(e) = conf.read().await.save().await {
             JsonResponse::bad_request(&format!("Error saving conf: {}", e))
         } else {
-            println!("user info updated");
+            log::info!("user info updated");
             JsonResponse::ok("success")
         }
     }
@@ -169,14 +174,17 @@ impl Server {
     }
 
     async fn handle_logout(_req: HttpRequest, conf: GlobalAppInfo) -> HttpResponse {
-        if let Some(url) = conf.read().await.config().logout_url_base() {
-            println!("trying to logout from {}", url);
-            match logout_async(url).await {
-                Ok(_) => JsonResponse::ok("success"),
-                Err(e) => JsonResponse::bad_request(&format!("Error logging out: {}", e)),
-            }
-        } else {
-            JsonResponse::bad_request("logout url not set")
+        match logout_async(
+            conf.read()
+                .await
+                .config()
+                .logout_url_base()
+                .unwrap_or("http://10.101.2.205"),
+        )
+        .await
+        {
+            Ok(_) => JsonResponse::ok("success"),
+            Err(e) => JsonResponse::bad_request(&format!("Error logging out: {}", e)),
         }
     }
 }

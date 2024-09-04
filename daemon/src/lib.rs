@@ -32,7 +32,16 @@ pub async fn start() {
     let serv_handle = tokio::spawn(serve::Server::serve(conf.0));
 
     // !todo pass panic to server thread
-    let handles = tokio::join!(conf.1, serv_handle);
-    handles.0.unwrap();
-    handles.1.unwrap().unwrap();
+    tokio::select! {
+        conf_res = conf.1 => {
+            if let Err(e) = conf_res {
+                log::error!("conf watcher stopped: {:?}", e)
+            }
+        },
+        serv_res = serv_handle => {
+            if let Err(e) = serv_res {
+                log::error!("server stopped: {:?}", e)
+            }
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Style, Stylize},
@@ -94,18 +94,20 @@ impl Component for Menu {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> crate::Result<()> {
-        match key.code {
-            KeyCode::Up => {
-                self.selecton = (self.selecton + self.menu.len() - 1) % self.menu.len();
-                self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
-            }
-            KeyCode::Down => {
-                self.selecton = (self.selecton + 1) % self.menu.len();
-                self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
-            }
-            KeyCode::Enter => self.execute(self.menu[self.selecton]),
-            _ => (),
-        };
+        if key.kind != KeyEventKind::Release {
+            match key.code {
+                KeyCode::Up => {
+                    self.selecton = (self.selecton + self.menu.len() - 1) % self.menu.len();
+                    self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
+                }
+                KeyCode::Down => {
+                    self.selecton = (self.selecton + 1) % self.menu.len();
+                    self.action_tx.as_ref().unwrap().send(Action::Draw).unwrap();
+                }
+                KeyCode::Enter => self.execute(self.menu[self.selecton]),
+                _ => (),
+            };
+        }
 
         Ok(())
     }

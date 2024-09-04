@@ -4,8 +4,9 @@ use api::auth::{
     auth_async::{auth, get_auth_info, get_index_page},
     AuthError, UserInfo,
 };
+#[cfg(feature = "sys-notify")]
 use notify::Watcher;
-use reqwest::Client;
+use reqwest::ClientBuilder;
 use tokio::{
     runtime::Handle,
     task::{self, JoinHandle, LocalSet},
@@ -17,19 +18,26 @@ use crate::{
     Error,
 };
 
-pub async fn check_autewifi(client: &Client) -> bool {
-    if let Ok(resp) = client
+pub async fn check_autewifi() -> bool {
+    let resp = ClientBuilder::new()
+        .build()
+        .unwrap()
         .get("http://192.168.0.1")
         .timeout(Duration::from_secs(1))
         .send()
         .await
-        .map(|r| r.text())
-    {
-        resp.await
+        .map(|r| r.text());
+    match resp {
+        Ok(resp) => resp
+            .await
             .map(|r| r.contains("location.replace(\"http://10."))
-            .unwrap_or(false)
-    } else {
-        false
+            .unwrap_or(false),
+        Err(e) => {
+            if !e.is_timeout() {
+                log::trace!("not autewifi: {:?}", e);
+            }
+            false
+        }
     }
 }
 
@@ -42,15 +50,21 @@ pub enum Signal {
 pub async fn notify(msg: &str) {
     use notify_rust::Notification;
 
-    let result = Notification::new()
-        .subtitle("Htu Net Login")
-        .summary("Htu Net Login")
-        .body(msg)
-        .show_async()
-        .await;
-    println!("send notify: {}", msg);
-    if let Err(e) = result {
-        eprintln!("sys notify err: {}", e)
+    let mut noti = Notification::new();
+    let noti = noti.subtitle("Htu Net Login").summary(msg);
+    let result_r = {
+        #[cfg(target_os = "windows")]
+        {
+            noti.show()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            noti.show_async().await
+        }
+    };
+    log::info!("send notify: {}", msg);
+    if let Err(e) = result_r {
+        log::error!("sys notify err: {}", e)
     }
 }
 
@@ -65,15 +79,14 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
         let appinfo = appinfo_inner;
         let rt = Handle::current();
         rt.block_on(async move {
-            let client = Client::new();
             let local = LocalSet::new();
             let res = local
                 .run_until(async move {
-                    println!("running login thread");
+                    log::info!("running login thread");
                     task::spawn_local(async move {
                         let mut success = true;
                         while appinfo.running().await {
-                            if !check_autewifi(&client).await {
+                            if !check_autewifi().await {
                                 continue;
                             }
 
@@ -92,25 +105,25 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
                                         .set_logout_url_base(url.logout_url_base);
                                     drop(appinfo_write);
                                     let _ = appinfo.read().await.save().await;
-                                    println!("login success");
+                                    log::info!("login success");
                                 }
                                 Err(e) => {
                                     let AuthError::AuthFailed { msg } = e else {
-                                        eprintln!("login error: {}", e);
+                                        log::error!("login error: {}", e);
                                         continue;
                                     };
 
                                     if success {
                                         #[cfg(feature = "sys-notify")]
                                         notify(&format!("登录失败: {}", msg)).await;
-                                        eprintln!("login error: {}", msg);
+                                        log::error!("login error: {}", msg);
                                         success = false;
                                     }
                                     time::sleep(Duration::from_secs(5)).await;
                                 }
                             };
                         }
-                        println!("login thread exit");
+                        log::info!("login thread exit");
                         #[cfg(feature = "auto-update")]
                         watcher
                             .unwatch(appinfo.read().await.config_path().parent().unwrap())
@@ -120,7 +133,7 @@ pub async fn start() -> Result<(GlobalAppInfo, JoinHandle<()>), Error> {
                 })
                 .await;
             if let Err(e) = res {
-                eprintln!("daemon error: {}", e);
+                log::error!("daemon error: {}", e);
             }
         })
     });
@@ -153,7 +166,7 @@ async fn login(user: UserInfo) -> Result<LoginUrls, AuthError> {
     let last_url = url.url.clone();
     let logout_url = auth_info.logout_url_root.clone();
     auth(url, auth_info, &user).await?;
-    println!("connected to htu-net");
+    log::info!("connected to htu-net");
     #[cfg(feature = "sys-notify")]
     notify("已连接到校园网").await;
     Ok(LoginUrls {

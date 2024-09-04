@@ -1,7 +1,6 @@
 use std::{ops::Deref, path::PathBuf, sync::Arc};
 
 use api::auth::UserInfo;
-use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
@@ -44,16 +43,21 @@ impl Config {
     }
 }
 
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|r| r.join("htu-net"))
+}
+
 pub(crate) trait AppConfig: Sized {
     fn new(conf: Config, path: PathBuf) -> Self;
     fn config(&self) -> &Config;
     fn config_mut(&mut self) -> &mut Config;
+    #[allow(dead_code)]
     fn config_path(&self) -> &PathBuf;
     #[allow(dead_code)]
     fn config_path_mut(&mut self) -> &mut PathBuf;
 
     async fn get_or_create_path() -> io::Result<(PathBuf, bool)> {
-        let dir = config_dir().unwrap().join("htu-net");
+        let dir = config_dir().unwrap();
         if !dir.exists() {
             fs::create_dir_all(&dir).await?;
         }
@@ -172,36 +176,36 @@ impl GlobalAppInfo {
                 )) = r.kind
                 {
                     if r.paths.iter().any(|p| *p == conf_path) {
-                        println!("config file updated");
+                        log::info!("config file updated");
                         tx.send(()).unwrap();
                     }
                 }
             }
-            Err(e) => eprintln!("watch err:{:?}", e),
+            Err(e) => log::error!("watch err:{:?}", e),
         })?;
         let app_info_inner = app_info.clone();
         let handle = tokio::spawn(async move {
-            println!("config file updater started");
+            log::info!("config file updater started");
             let conf_path = app_info_inner.read().await.config_path().clone();
             while rx.recv().await.is_some() && app_info_inner.running().await {
                 if let Ok(data) = fs::read(&conf_path).await {
                     #[cfg(debug_assertions)]
-                    println!("config file updated, parsing...");
+                    log::info!("config file updated, parsing...");
                     match serde_json::from_slice(&data) {
                         Ok(conf) => {
                             *app_info.write().await.config_mut() = conf;
                             #[cfg(debug_assertions)]
-                            println!("config updated successfully");
+                            log::info!("config updated successfully");
                             #[cfg(feature = "sys-notify")]
                             crate::daemon::notify("配置文件已更新").await;
                         }
                         Err(e) => {
-                            eprintln!("Error parsing config: {}", e);
+                            log::error!("Error parsing config: {}", e);
                         }
                     };
                 }
             }
-            println!("config file updater stopped");
+            log::info!("config file updater stopped");
         });
         watcher.watch(
             self.read().await.config_path().parent().unwrap(),

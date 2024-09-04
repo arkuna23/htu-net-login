@@ -95,7 +95,7 @@ impl Component for Input {
         }
 
         let span = if self.selected {
-            text.white().on_dark_gray()
+            text.white().on_blue()
         } else {
             text.white().on_black()
         };

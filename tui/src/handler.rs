@@ -28,10 +28,10 @@ pub async fn term_event_loop(
 ) {
     let duration = Duration::from_secs_f64(1f64 / (tick_rate as f64));
     loop {
+        let has_event = event::poll(duration).unwrap();
         if is_exited.load(Ordering::SeqCst) {
             break;
         };
-        let has_event = event::poll(duration).unwrap();
         if has_event {
             tx.send(event::read().unwrap()).unwrap();
         }
